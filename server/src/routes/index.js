@@ -9,6 +9,7 @@ import adminRoutes from './adminRoutes.js';
 const router = Router();
 
 router.use('/health', healthRoutes);
+router.get('/cors-check', (req, res) => res.json({ ok: true }));
 router.use('/auth', authRoutes);
 router.use('/appointments', appointmentRoutes);
 router.use('/doctors', doctorRoutes);

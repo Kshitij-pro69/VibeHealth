@@ -10,13 +10,39 @@ import { logger } from './utils/logger.js';
 
 const app = express();
 
-// Middleware
-app.use(
-  cors({
-    origin: [config.clientUrl, 'http://localhost:5173', 'http://127.0.0.1:5173'],
-    credentials: true,
-  })
-);
+// Helper to normalize origins by stripping trailing slashes and trimming whitespace
+const normalizeOrigin = (url) => (url ? String(url).replace(/\/+$/, '').trim() : '');
+
+const configuredClientUrl = normalizeOrigin(config.clientUrl);
+const defaultOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173', 'http://localhost:3000'];
+const allowedOrigins = Array.from(new Set([configuredClientUrl, ...defaultOrigins].filter(Boolean)));
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // Allow requests with no origin (e.g. server-to-server, curl, Postman)
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    const normalizedIncomingOrigin = normalizeOrigin(origin);
+    const isAllowed = allowedOrigins.includes(normalizedIncomingOrigin);
+
+    if (isAllowed) {
+      callback(null, true);
+    } else {
+      logger.warn(
+        `[CORS REJECTED] Rejected Origin: "${origin}" | Normalized: "${normalizedIncomingOrigin}" | Configured CLIENT_URL: "${config.clientUrl}" | Allowed Origins: ${JSON.stringify(allowedOrigins)}`
+      );
+      callback(new Error(`CORS policy rejection: Origin "${origin}" is not allowed`));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
+};
+
+// Apply hardened global CORS middleware before all routes
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
