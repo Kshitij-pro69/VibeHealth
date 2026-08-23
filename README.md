@@ -10,9 +10,14 @@ A modern, fault-tolerant healthcare appointment and follow-up management platfor
 - **Slot Concurrency Protection:** Redis (`ioredis`) short-lived holds combined with MongoDB database-level compound unique indexes `(doctorId, startTime)` on active appointments.
 - **Asynchronous Background Processing:** BullMQ-driven background workers (in-process for free-tier hosting) handling transactional emails, Google Calendar synchronization, and Google Gemini AI clinical triage summaries.
 - **Fault-Tolerant Integrations:** Core booking and cancellation actions succeed independently of third-party API availability.
-- **Clinical AI Safety:** AI pre-visit notes are strictly categorized as *Clinician-Reference Triage Assistance*. Post-visit notes are editable and doctor-approved before patient visibility.
+- **Clinical AI Safety & Human-in-the-Loop Architecture:**
+  - **Pre-Visit Triage:** Strictly labeled *Clinician-Reference Triage Assistance*. Validated against strict Zod schemas before persistence.
+  - **Post-Visit Summary Human-in-the-Loop Gate:** All AI-generated patient summaries are generated in draft state (`patientSummaryStatus = 'pending' -> 'completed'`). Nothing is visible on the patient portal or sent via email until the attending physician explicitly reviews, edits, and clicks **"Approve & Release to Patient"** (`doctorApproved = true`).
+  - **Strict No-Hallucination Prompting:** The LLM prompt explicitly restricts output to rephrasing clinical notes provided by the doctor—strictly forbidding addition of external diagnoses, advice, or unlisted medications.
+  - **Non-Blocking AI Failures:** If Gemini API or worker retries fail (`patientSummaryStatus = 'failed'`), the appointment record remains active (`confirmed`/`completed`). The doctor can write or edit the patient summary manually and approve it without LLM dependency.
 
 ---
+
 
 ## 🛠️ Technology Stack
 

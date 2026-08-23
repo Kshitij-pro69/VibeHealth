@@ -19,6 +19,23 @@ export const PreVisitSummaryOutputSchema = z.object({
     .length(3, 'suggestedQuestions must contain exactly 3 strings'),
 });
 
+// ---------------------------------------------------------------------------
+// PATIENT SUMMARY OUTPUT SCHEMA
+// Validates the post-visit patient-friendly summary before any DB persistence.
+// ---------------------------------------------------------------------------
+export const PatientSummaryOutputSchema = z.object({
+  summary: z.string().min(1, 'summary must be a non-empty string'),
+  medicationSchedule: z
+    .array(
+      z.object({
+        medication: z.string().min(1),
+        schedule: z.string().min(1),
+      })
+    )
+    .default([]),
+  followUpSteps: z.array(z.string()).max(10).default([]),
+});
+
 // Legacy schema kept for post-visit summary (unchanged)
 export const PostVisitSummarySchema = z.object({
   clinicalNotes: z.string().default(''),
@@ -150,8 +167,65 @@ Current medications: ${currentMedications || 'None reported'}`;
   }
 
   // ---------------------------------------------------------------------------
-  // POST-VISIT CLINICAL SUMMARY (unchanged from Phase 5)
+  // POST-VISIT PATIENT-FRIENDLY SUMMARY
+  //
+  // HUMAN-IN-THE-LOOP: AI output is held in draft. Nothing reaches the patient
+  // until the attending doctor explicitly approves and releases it.
+  //
+  // PROMPT CONSTRAINT (from brief, verbatim):
+  //   "Rephrase only what is written below — do not add any diagnosis, advice,
+  //    medication, or recommendation that does not appear in the notes."
+  //
+  // Returns:
+  //   { success: true, data: { summary, medicationSchedule[], followUpSteps[] } }
+  //   { success: false, error: string, data: null }
   // ---------------------------------------------------------------------------
+  static async generatePatientSummary(clinicalNotes, prescriptions = [], timeoutMs = 20000) {
+    try {
+      // Format prescriptions into human-readable text for the prompt
+      const prescriptionText =
+        prescriptions.length > 0
+          ? prescriptions
+              .map(
+                (rx) =>
+                  `${rx.medicationName} ${rx.dosage} — ${rx.frequency} for ${rx.durationDays} days${rx.instructions ? ` (${rx.instructions})` : ''}`
+              )
+              .join('\n')
+          : 'No medications prescribed.';
+
+      // Exact prompt from the brief, with explicit no-hallucination constraint
+      const prompt = `Rewrite the following clinical notes into a clear, plain-language summary for a patient with no medical background. Return ONLY valid JSON with keys: "summary" (a plain-language narrative string explaining what was discussed and what the patient should know), "medicationSchedule" (array of objects with keys "medication" and "schedule" — one entry per prescribed medication, no more), "followUpSteps" (array of strings listing next steps the patient should take, drawn only from the notes). Rephrase only what is written below — do not add any diagnosis, advice, medication, or recommendation that does not appear in the notes. Avoid alarming language.
+
+Notes: ${clinicalNotes}
+
+Prescription:
+${prescriptionText}`;
+
+      const validated = await this.generateStructured(prompt, PatientSummaryOutputSchema, timeoutMs);
+
+      return {
+        success: true,
+        data: {
+          summary: validated.summary,
+          medicationSchedule: validated.medicationSchedule,
+          followUpSteps: validated.followUpSteps,
+          aiGeneratedAt: new Date(),
+        },
+      };
+    } catch (err) {
+      logger.error('GeminiService.generatePatientSummary failed:', { error: err.message });
+      return {
+        success: false,
+        error: err.message,
+        data: null,
+      };
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // POST-VISIT CLINICAL SUMMARY (legacy — kept for backward compatibility)
+  // ---------------------------------------------------------------------------
+
   static async formatPostVisitEncounter(rawDoctorNotes, timeoutMs = 8000) {
     if (!config.gemini.apiKey) {
       return { success: false, error: 'Gemini API key not configured', data: null };

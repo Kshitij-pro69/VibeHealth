@@ -49,7 +49,11 @@ export const postVisitSchema = z.object({
       })
     )
     .default([]),
-  doctorApproved: z.boolean().default(true),
+});
+
+export const approvePatientSummarySchema = z.object({
+  // The final text shown to the patient — may be AI-generated (edited) or fully manual
+  approvedText: z.string().min(1, 'Approved text is required'),
 });
 
 /**
@@ -386,32 +390,58 @@ export const cancelAppointment = async (req, res, next) => {
 };
 
 /**
- * 6. Doctor Updates / Approves Post-Visit Clinical Summary
+ * 6. Doctor Saves Post-Visit Clinical Notes & Triggers AI Patient Summary Pipeline
+ *
+ * Saves the doctor's clinical notes, diagnosis, and prescriptions as a DRAFT.
+ * This does NOT make anything patient-visible — that requires explicit approval
+ * via POST /:id/approve-summary (the human-in-the-loop gate).
+ *
+ * Side effects (non-blocking):
+ *   - Sets postVisitSummary.patientSummaryStatus = 'pending'
+ *   - Dispatches BullMQ 'generate-patient-summary' job
  */
 export const updatePostVisitSummary = async (req, res, next) => {
   try {
     const appointment = req.appointment;
-    const { clinicalNotes, diagnosis, prescriptions, doctorApproved } = req.body;
+    const { clinicalNotes, diagnosis, prescriptions } = req.body;
 
+    // Persist clinical data
     appointment.postVisitSummary = {
+      ...appointment.postVisitSummary?.toObject?.() ?? {},
       clinicalNotes,
       diagnosis,
-      prescriptions,
-      doctorApproved: Boolean(doctorApproved),
-      doctorApprovedAt: doctorApproved ? new Date() : null,
-      patientVisibleAt: doctorApproved ? new Date() : null,
+      prescriptions: prescriptions || [],
+      // Reset patient summary pipeline state to 'pending' — new notes, new summary
+      patientSummaryStatus: 'pending',
+      patientSummary: {
+        generatedText: '',
+        approvedText: '',
+        medicationSchedule: [],
+        followUpSteps: [],
+        aiGeneratedAt: null,
+      },
+      // Retain approval state from before (do not override if already approved)
+      doctorApproved: false,
+      doctorApprovedAt: null,
+      patientVisibleAt: null,
+      patientSummaryEmailSentAt: null,
     };
 
-    if (doctorApproved) {
-      appointment.status = 'completed';
-    }
-
     await appointment.save();
+
+    // Dispatch AI patient-summary generation job (non-blocking)
+    dispatchLLMSummaryJob('generate-patient-summary', {
+      appointmentId: appointment._id.toString(),
+      doctorId: appointment.doctorId.toString(),
+      patientId: appointment.patientId.toString(),
+      clinicalNotes,
+      prescriptions: prescriptions || [],
+    });
 
     return ApiResponse.success(
       res,
       { postVisitSummary: appointment.postVisitSummary },
-      'Post-visit clinical summary saved successfully'
+      'Clinical notes saved. AI patient summary is being generated.'
     );
   } catch (error) {
     next(error);
@@ -478,3 +508,86 @@ export const retryAISummary = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * 8. Doctor Approves & Releases Patient Summary (Human-in-the-Loop Gate)
+ *
+ * Marks the appointment as 'completed' and sets postVisitSummary.doctorApproved = true.
+ * Patient summary text (edited or manual) becomes patient-visible and triggers an email notification.
+ */
+export const approvePatientSummary = async (req, res, next) => {
+  try {
+    const appointment = req.appointment;
+    const { approvedText } = req.body;
+
+    if (!approvedText || typeof approvedText !== 'string' || !approvedText.trim()) {
+      return ApiResponse.error(res, 'Approved text is required to release the summary.', 400);
+    }
+
+    const now = new Date();
+
+    appointment.postVisitSummary.patientSummary.approvedText = approvedText.trim();
+    appointment.postVisitSummary.doctorApproved = true;
+    appointment.postVisitSummary.doctorApprovedAt = now;
+    appointment.postVisitSummary.patientVisibleAt = now;
+    appointment.status = 'completed';
+
+    await appointment.save();
+
+    // Enqueue email dispatch job to patient (non-blocking)
+    const { getQueues } = await import('../jobs/queue.js');
+    const { emailQueue } = getQueues();
+    await emailQueue.add('send-post-visit-summary', {
+      appointmentId: appointment._id.toString(),
+      patientId: appointment.patientId.toString(),
+      doctorId: appointment.doctorId.toString(),
+    });
+
+    logger.info(`Post-visit summary approved for appointment #${appointment._id}`);
+
+    return ApiResponse.success(
+      res,
+      { postVisitSummary: appointment.postVisitSummary, status: appointment.status },
+      'Post-visit summary approved and released to patient.'
+    );
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * 9. Doctor Retries AI Patient Summary Generation
+ */
+export const retryPatientSummary = async (req, res, next) => {
+  try {
+    const appointment = req.appointment;
+
+    if (!appointment.postVisitSummary?.clinicalNotes) {
+      return ApiResponse.error(res, 'No clinical notes found to generate summary from.', 400);
+    }
+
+    // Reset pipeline state
+    appointment.postVisitSummary.patientSummaryStatus = 'pending';
+    await appointment.save();
+
+    // Re-enqueue job
+    await dispatchLLMSummaryJob('generate-patient-summary', {
+      appointmentId: appointment._id.toString(),
+      doctorId: appointment.doctorId.toString(),
+      patientId: appointment.patientId.toString(),
+      clinicalNotes: appointment.postVisitSummary.clinicalNotes,
+      prescriptions: appointment.postVisitSummary.prescriptions || [],
+    });
+
+    logger.info(`Patient summary retry queued for appointment #${appointment._id}`);
+
+    return ApiResponse.success(
+      res,
+      { patientSummaryStatus: 'pending' },
+      'AI patient summary retry queued.'
+    );
+  } catch (error) {
+    next(error);
+  }
+};
+

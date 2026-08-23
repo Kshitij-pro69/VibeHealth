@@ -7,9 +7,12 @@ import {
   cancelAppointment,
   updatePostVisitSummary,
   retryAISummary,
+  approvePatientSummary,
+  retryPatientSummary,
   holdSlotSchema,
   confirmBookingSchema,
   postVisitSchema,
+  approvePatientSummarySchema,
 } from '../controllers/appointmentController.js';
 import { authenticate } from '../middleware/auth.js';
 import { requireDoctor } from '../middleware/rbac.js';
@@ -37,7 +40,7 @@ router.get('/:id', requireAppointmentOwnership, getAppointmentById);
 // 5. Cancel appointment
 router.put('/:id/cancel', requireAppointmentOwnership, cancelAppointment);
 
-// 6. Doctor post-visit notes update & approval
+// 6. Doctor post-visit notes update & draft saving
 router.put(
   '/:id/post-visit',
   requireDoctor,
@@ -48,5 +51,22 @@ router.put(
 
 // 7. Doctor retries AI pre-visit triage summary generation (failed or stale)
 router.post('/:id/retry-summary', requireDoctor, requireAppointmentOwnership, retryAISummary);
+
+// 8. Doctor approves and releases patient summary (human-in-the-loop)
+router.post(
+  '/:id/approve-summary',
+  requireDoctor,
+  requireAppointmentOwnership,
+  validateRequest(approvePatientSummarySchema),
+  approvePatientSummary
+);
+
+// 9. Doctor retries AI patient-summary generation
+router.post(
+  '/:id/retry-patient-summary',
+  requireDoctor,
+  requireAppointmentOwnership,
+  retryPatientSummary
+);
 
 export default router;

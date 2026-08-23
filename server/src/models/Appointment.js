@@ -41,6 +41,7 @@ const preVisitSummarySchema = new mongoose.Schema(
 
 const postVisitSummarySchema = new mongoose.Schema(
   {
+    // Doctor-facing clinical data (never exposed to patient directly)
     clinicalNotes: {
       type: String,
       default: '',
@@ -58,6 +59,38 @@ const postVisitSummarySchema = new mongoose.Schema(
         instructions: String,
       },
     ],
+
+    // AI patient-summary pipeline state
+    // 'none'      — clinical notes not yet saved / no job dispatched
+    // 'pending'   — LLM job dispatched, awaiting result
+    // 'completed' — generatedText is ready for doctor review
+    // 'failed'    — all retries exhausted; doctor must write manually
+    patientSummaryStatus: {
+      type: String,
+      enum: ['none', 'pending', 'completed', 'failed'],
+      default: 'none',
+    },
+
+    // AI-generated patient-friendly content (held in draft until doctor approves)
+    patientSummary: {
+      // Plain-language narrative the AI wrote (doctor may edit before approving)
+      generatedText: { type: String, default: '' },
+      // The final text the doctor approved — THIS is what the patient sees
+      approvedText: { type: String, default: '' },
+      // Structured medication schedule extracted from prescription list
+      medicationSchedule: [
+        {
+          medication: String,
+          schedule: String,
+        },
+      ],
+      // Follow-up steps extracted by AI
+      followUpSteps: [String],
+      // When the AI generated the summary
+      aiGeneratedAt: { type: Date },
+    },
+
+    // Human-in-the-loop approval gate
     doctorApproved: {
       type: Boolean,
       default: false, // Must be true before patient can view post-visit summary
@@ -72,9 +105,16 @@ const postVisitSummarySchema = new mongoose.Schema(
     patientVisibleAt: {
       type: Date,
     },
+
+    // Tracks whether the approval email has been dispatched to the patient
+    patientSummaryEmailSentAt: {
+      type: Date,
+      default: null,
+    },
   },
   { _id: false }
 );
+
 
 const appointmentSchema = new mongoose.Schema(
   {

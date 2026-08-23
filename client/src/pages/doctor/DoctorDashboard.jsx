@@ -36,8 +36,13 @@ export const DoctorDashboard = () => {
   // Post-visit review form state
   const [clinicalNotes, setClinicalNotes] = useState('');
   const [diagnosis, setDiagnosis] = useState('');
-  const [medication, setMedication] = useState({ name: '', dosage: '', frequency: 'Once daily', days: 7 });
+  const [prescriptions, setPrescriptions] = useState([
+    { medicationName: '', dosage: '', frequency: 'Once daily', durationDays: 7, instructions: '' },
+  ]);
+  const [approvedText, setApprovedText] = useState('');
   const [saveLoading, setSaveLoading] = useState(false);
+  const [approveLoading, setApproveLoading] = useState(false);
+  const [retryPatientSummaryLoading, setRetryPatientSummaryLoading] = useState(false);
 
   const fetchDoctorAppointments = async () => {
     try {
@@ -45,6 +50,19 @@ export const DoctorDashboard = () => {
       const res = await api.get('/appointments/my');
       if (res.success) {
         setAppointments(res.data.appointments);
+        // If an active modal is open, keep its state synced
+        if (activeAppointment) {
+          const updated = res.data.appointments.find((a) => a._id === activeAppointment._id);
+          if (updated) {
+            setActiveAppointment(updated);
+            if (updated.postVisitSummary?.patientSummary?.generatedText && !approvedText) {
+              setApprovedText(
+                updated.postVisitSummary.patientSummary.approvedText ||
+                  updated.postVisitSummary.patientSummary.generatedText
+              );
+            }
+          }
+        }
       }
     } catch (err) {
       console.error('Failed to load appointments:', err);
@@ -55,8 +73,8 @@ export const DoctorDashboard = () => {
 
   useEffect(() => {
     fetchDoctorAppointments();
-    // Poll every 8 seconds to pick up completed/failed AI summaries
-    const poll = setInterval(fetchDoctorAppointments, 8000);
+    // Poll every 5 seconds to pick up completed/failed AI summaries
+    const poll = setInterval(fetchDoctorAppointments, 5000);
     return () => clearInterval(poll);
   }, []);
 
@@ -64,13 +82,49 @@ export const DoctorDashboard = () => {
     setActiveAppointment(apt);
     setClinicalNotes(apt.postVisitSummary?.clinicalNotes || '');
     setDiagnosis(apt.postVisitSummary?.diagnosis || '');
+    const rxList = apt.postVisitSummary?.prescriptions;
+    setPrescriptions(
+      rxList && rxList.length > 0
+        ? rxList.map((p) => ({
+            medicationName: p.medicationName || '',
+            dosage: p.dosage || '',
+            frequency: p.frequency || 'Once daily',
+            durationDays: p.durationDays || 7,
+            instructions: p.instructions || '',
+          }))
+        : [{ medicationName: '', dosage: '', frequency: 'Once daily', durationDays: 7, instructions: '' }]
+    );
+    setApprovedText(
+      apt.postVisitSummary?.patientSummary?.approvedText ||
+        apt.postVisitSummary?.patientSummary?.generatedText ||
+        apt.postVisitSummary?.clinicalNotes ||
+        ''
+    );
+  };
+
+  const handleAddPrescription = () => {
+    setPrescriptions((prev) => [
+      ...prev,
+      { medicationName: '', dosage: '', frequency: 'Once daily', durationDays: 7, instructions: '' },
+    ]);
+  };
+
+  const handleRemovePrescription = (index) => {
+    setPrescriptions((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const handlePrescriptionChange = (index, field, value) => {
+    setPrescriptions((prev) => {
+      const copy = [...prev];
+      copy[index] = { ...copy[index], [field]: value };
+      return copy;
+    });
   };
 
   const handleRetryAISummary = async (apt) => {
     setRetryingIds((prev) => ({ ...prev, [apt._id]: true }));
     try {
       await api.post(`/appointments/${apt._id}/retry-summary`);
-      // Optimistically update local state to pending
       setAppointments((prev) =>
         prev.map((a) =>
           a._id === apt._id
@@ -85,30 +139,21 @@ export const DoctorDashboard = () => {
     }
   };
 
-  const handleSavePostVisit = async (approve = false) => {
+  const handleSaveDraftNotes = async () => {
     if (!activeAppointment) return;
     setSaveLoading(true);
 
     try {
+      const validPrescriptions = prescriptions.filter((p) => p.medicationName.trim());
+
       const payload = {
         clinicalNotes,
         diagnosis,
-        prescriptions: medication.name
-          ? [
-              {
-                medicationName: medication.name,
-                dosage: medication.dosage,
-                frequency: medication.frequency,
-                durationDays: Number(medication.days),
-              },
-            ]
-          : [],
-        doctorApproved: approve,
+        prescriptions: validPrescriptions,
       };
 
       const res = await api.put(`/appointments/${activeAppointment._id}/post-visit`, payload);
       if (res.success) {
-        setActiveAppointment(null);
         fetchDoctorAppointments();
       }
     } catch (err) {
@@ -117,6 +162,40 @@ export const DoctorDashboard = () => {
       setSaveLoading(false);
     }
   };
+
+  const handleApprovePatientSummary = async () => {
+    if (!activeAppointment || !approvedText.trim()) return;
+    setApproveLoading(true);
+
+    try {
+      const res = await api.post(`/appointments/${activeAppointment._id}/approve-summary`, {
+        approvedText: approvedText.trim(),
+      });
+
+      if (res.success) {
+        setActiveAppointment(null);
+        fetchDoctorAppointments();
+      }
+    } catch (err) {
+      console.error('Error approving summary:', err);
+    } finally {
+      setApproveLoading(false);
+    }
+  };
+
+  const handleRetryPatientSummary = async () => {
+    if (!activeAppointment) return;
+    setRetryPatientSummaryLoading(true);
+    try {
+      await api.post(`/appointments/${activeAppointment._id}/retry-patient-summary`);
+      fetchDoctorAppointments();
+    } catch (err) {
+      console.error('Error retrying patient summary:', err);
+    } finally {
+      setRetryPatientSummaryLoading(false);
+    }
+  };
+
 
   return (
     <div className="space-y-8">
@@ -298,16 +377,18 @@ export const DoctorDashboard = () => {
         )}
       </div>
 
-      {/* Post-Visit Clinical Documentation Modal */}
+      {/* Post-Visit Clinical Documentation & Human-in-the-Loop Approval Modal */}
       {activeAppointment && (
         <div className="fixed inset-0 z-50 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4">
-          <Card className="w-full max-w-2xl max-h-[90vh] overflow-y-auto p-6 space-y-6">
+          <Card className="w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6 space-y-6">
             <div className="flex justify-between items-center border-b pb-3">
               <div>
                 <h3 className="text-lg font-bold text-slate-900">
-                  Encounter Documentation: {activeAppointment.patientId?.name}
+                  Clinical Encounter: {activeAppointment.patientId?.name}
                 </h3>
-                <p className="text-xs text-slate-500">Edit notes before approving for patient visibility</p>
+                <p className="text-xs text-slate-500">
+                  Save clinical notes draft to generate an AI summary for your review. Patient sees summary ONLY after approval.
+                </p>
               </div>
               <button
                 onClick={() => setActiveAppointment(null)}
@@ -317,7 +398,10 @@ export const DoctorDashboard = () => {
               </button>
             </div>
 
+            {/* SECTION 1: Doctor Clinical Notes & Prescriptions */}
             <div className="space-y-4">
+              <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide">1. Doctor Clinical Notes</h4>
+
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-slate-700">Primary Diagnosis</label>
                 <input
@@ -330,7 +414,7 @@ export const DoctorDashboard = () => {
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-700">Doctor Clinical Notes</label>
+                <label className="text-xs font-semibold text-slate-700">Doctor Clinical Notes (Free Text)</label>
                 <textarea
                   rows="4"
                   value={clinicalNotes}
@@ -340,46 +424,156 @@ export const DoctorDashboard = () => {
                 />
               </div>
 
+              {/* Dynamic Prescription List */}
               <div className="p-4 bg-slate-50 rounded-2xl space-y-3">
-                <label className="text-xs font-semibold text-slate-700">Prescribe Medication</label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  <input
-                    type="text"
-                    placeholder="Medication name"
-                    value={medication.name}
-                    onChange={(e) => setMedication((p) => ({ ...p, name: e.target.value }))}
-                    className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Dosage (e.g. 500mg)"
-                    value={medication.dosage}
-                    onChange={(e) => setMedication((p) => ({ ...p, dosage: e.target.value }))}
-                    className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Frequency"
-                    value={medication.frequency}
-                    onChange={(e) => setMedication((p) => ({ ...p, frequency: e.target.value }))}
-                    className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs"
-                  />
-                  <input
-                    type="number"
-                    placeholder="Days"
-                    value={medication.days}
-                    onChange={(e) => setMedication((p) => ({ ...p, days: e.target.value }))}
-                    className="px-3 py-2 bg-white border border-slate-200 rounded-xl text-xs"
-                  />
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-slate-700">Structured Prescriptions</label>
+                  <button
+                    type="button"
+                    onClick={handleAddPrescription}
+                    className="text-[11px] font-semibold text-teal-600 hover:text-teal-700"
+                  >
+                    + Add Medication
+                  </button>
                 </div>
+
+                {prescriptions.map((rx, idx) => (
+                  <div key={idx} className="grid grid-cols-1 sm:grid-cols-5 gap-2 items-center bg-white p-2.5 rounded-xl border border-slate-200">
+                    <input
+                      type="text"
+                      placeholder="Medication name"
+                      value={rx.medicationName}
+                      onChange={(e) => handlePrescriptionChange(idx, 'medicationName', e.target.value)}
+                      className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Dosage (e.g. 500mg)"
+                      value={rx.dosage}
+                      onChange={(e) => handlePrescriptionChange(idx, 'dosage', e.target.value)}
+                      className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Frequency (e.g. Twice daily)"
+                      value={rx.frequency}
+                      onChange={(e) => handlePrescriptionChange(idx, 'frequency', e.target.value)}
+                      className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+                    />
+                    <input
+                      type="number"
+                      placeholder="Days"
+                      value={rx.durationDays}
+                      onChange={(e) => handlePrescriptionChange(idx, 'durationDays', Number(e.target.value))}
+                      className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+                    />
+                    <div className="flex items-center justify-between gap-1">
+                      <input
+                        type="text"
+                        placeholder="Instructions (opt)"
+                        value={rx.instructions}
+                        onChange={(e) => handlePrescriptionChange(idx, 'instructions', e.target.value)}
+                        className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg text-xs"
+                      />
+                      {prescriptions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => handleRemovePrescription(idx)}
+                          className="text-rose-500 hover:text-rose-700 font-bold px-1 text-sm"
+                        >
+                          ✕
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex justify-end">
+                <Button onClick={handleSaveDraftNotes} variant="outline" size="sm" isLoading={saveLoading}>
+                  Save Notes & Generate Summary
+                </Button>
               </div>
             </div>
 
+            {/* SECTION 2: Human-in-the-Loop Patient Summary Review */}
+            <div className="border-t pt-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-bold text-slate-800 uppercase tracking-wide flex items-center gap-1.5">
+                  <Sparkles className="w-4 h-4 text-teal-600" />
+                  2. Patient-Facing Summary (Doctor Review & Approval Gate)
+                </h4>
+                <Badge variant={activeAppointment.postVisitSummary?.doctorApproved ? 'success' : 'warning'}>
+                  {activeAppointment.postVisitSummary?.doctorApproved ? 'APPROVED & SENT' : 'DRAFT (PATIENT CANNOT SEE)'}
+                </Badge>
+              </div>
+
+              {activeAppointment.postVisitSummary?.patientSummaryStatus === 'pending' && (
+                <div className="flex items-center gap-3 p-4 bg-slate-50 border border-slate-200 rounded-2xl">
+                  <div className="w-5 h-5 border-2 border-teal-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                  <div>
+                    <p className="text-xs font-semibold text-slate-700">AI is rephrasing clinical notes for patient readability…</p>
+                    <p className="text-[10px] text-slate-400 mt-0.5">Constraint: Only rephrasing clinical notes. No hallucinated advice added.</p>
+                  </div>
+                </div>
+              )}
+
+              {activeAppointment.postVisitSummary?.patientSummaryStatus === 'failed' && (
+                <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-rose-700 flex items-center gap-1.5">
+                      <XCircle className="w-4 h-4 text-rose-500" />
+                      AI Patient Summary Generation Unavailable
+                    </span>
+                    <button
+                      onClick={handleRetryPatientSummary}
+                      disabled={retryPatientSummaryLoading}
+                      className="flex items-center gap-1 px-2 py-1 bg-white border border-rose-300 text-rose-700 text-[11px] font-semibold rounded-lg hover:bg-rose-50"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${retryPatientSummaryLoading ? 'animate-spin' : ''}`} />
+                      Retry AI Summary
+                    </button>
+                  </div>
+                  <p className="text-xs text-rose-600">
+                    The AI summary could not be generated. You can edit the manual summary below and release it directly to the patient.
+                  </p>
+                </div>
+              )}
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-700 flex items-center justify-between">
+                  <span>Editable Patient Summary (Release Candidate)</span>
+                  <span className="text-[10px] text-slate-400">Doctor edits override AI text</span>
+                </label>
+                <textarea
+                  rows="5"
+                  value={approvedText}
+                  onChange={(e) => setApprovedText(e.target.value)}
+                  placeholder="Summary text that the patient will see upon approval..."
+                  className="w-full px-3 py-2 bg-teal-50/30 border border-teal-200 rounded-xl text-xs text-slate-800"
+                />
+              </div>
+
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-[11px] text-amber-800 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                <span>
+                  <strong>Human-in-the-Loop Security:</strong> Clicking <strong>"Approve & Release to Patient"</strong> marks the visit as complete, makes this text visible on the patient dashboard, and sends an email notification.
+                </span>
+              </div>
+            </div>
+
+            {/* Modal Actions */}
             <div className="flex items-center justify-end space-x-3 border-t pt-4">
-              <Button onClick={() => handleSavePostVisit(false)} variant="outline" size="sm" isLoading={saveLoading}>
-                Save as Draft
+              <Button onClick={() => setActiveAppointment(null)} variant="outline" size="sm">
+                Close
               </Button>
-              <Button onClick={() => handleSavePostVisit(true)} variant="primary" size="sm" isLoading={saveLoading}>
+              <Button
+                onClick={handleApprovePatientSummary}
+                variant="primary"
+                size="sm"
+                isLoading={approveLoading}
+                disabled={!approvedText.trim()}
+              >
                 <CheckCircle className="w-4 h-4 mr-1.5" />
                 Approve & Release to Patient
               </Button>
@@ -390,3 +584,4 @@ export const DoctorDashboard = () => {
     </div>
   );
 };
+

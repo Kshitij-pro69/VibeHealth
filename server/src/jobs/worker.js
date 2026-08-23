@@ -92,16 +92,41 @@ export const startWorkers = () => {
           // Throw so BullMQ records this attempt as failed and can retry
           throw new Error(result.error || 'LLM summary generation failed');
         }
+      } else if (
+        job.name === 'generate-patient-summary' ||
+        job.name === 'retry-patient-summary'
+      ) {
+        const { appointmentId, clinicalNotes, prescriptions = [] } = job.data;
+
+        const result = await GeminiService.generatePatientSummary(clinicalNotes, prescriptions);
+
+        if (result.success && result.data) {
+          // ✅ COMPLETED — persist draft summary for doctor review
+          await Appointment.findByIdAndUpdate(appointmentId, {
+            'postVisitSummary.patientSummaryStatus': 'completed',
+            'postVisitSummary.patientSummary.generatedText': result.data.summary,
+            'postVisitSummary.patientSummary.medicationSchedule': result.data.medicationSchedule,
+            'postVisitSummary.patientSummary.followUpSteps': result.data.followUpSteps,
+            'postVisitSummary.patientSummary.aiGeneratedAt': result.data.aiGeneratedAt,
+          });
+
+          logger.info(`✅ AI patient summary completed (draft) for appointment #${appointmentId}`);
+        } else {
+          // ❌ FAILED — mark patientSummaryStatus=failed. Doctor can write manually or retry.
+          logger.warn(
+            `AI patient summary failed for appointment #${appointmentId}: ${result.error}. Marking patientSummaryStatus=failed.`
+          );
+          await Appointment.findByIdAndUpdate(appointmentId, {
+            'postVisitSummary.patientSummaryStatus': 'failed',
+          });
+          throw new Error(result.error || 'AI patient summary generation failed');
+        }
       }
     },
     { connection, concurrency: 5 }
   );
 
   // Final-attempt failure safety net:
-  // If all 3 retries are exhausted and the job-level handler hasn't already
-  // set status='failed' (e.g. it threw before the DB write), this listener
-  // ensures we still flip the status flag. Uses attemptsMade check to only
-  // fire on the truly final attempt.
   llmWorker.on('failed', async (job, err) => {
     if (!job) return;
     const { appointmentId } = job.data ?? {};
@@ -114,13 +139,22 @@ export const startWorkers = () => {
         { error: err.message }
       );
       try {
-        // Only update if still stuck in 'pending' (avoid clobbering a 'completed' race)
-        await Appointment.findOneAndUpdate(
-          { _id: appointmentId, 'preVisitSummary.status': 'pending' },
-          { 'preVisitSummary.status': 'failed' }
-        );
+        if (job.name === 'generate-previsit-triage' || job.name === 'retry-previsit-triage') {
+          await Appointment.findOneAndUpdate(
+            { _id: appointmentId, 'preVisitSummary.status': 'pending' },
+            { 'preVisitSummary.status': 'failed' }
+          );
+        } else if (
+          job.name === 'generate-patient-summary' ||
+          job.name === 'retry-patient-summary'
+        ) {
+          await Appointment.findOneAndUpdate(
+            { _id: appointmentId, 'postVisitSummary.patientSummaryStatus': 'pending' },
+            { 'postVisitSummary.patientSummaryStatus': 'failed' }
+          );
+        }
       } catch (dbErr) {
-        logger.error('Failed to mark preVisitSummary.status=failed after final retry:', {
+        logger.error('Failed to mark summary status=failed after final retry:', {
           error: dbErr.message,
         });
       }
@@ -132,14 +166,40 @@ export const startWorkers = () => {
     }
   });
 
+
   // 2. Email Notification Worker
   const emailWorker = new Worker(
     'email-queue',
     async (job) => {
       logger.info(`Processing Email Job: ${job.name} (ID: ${job.id})`);
-      const { type, payload } = job.data;
+      if (job.name === 'send-post-visit-summary') {
+        const { appointmentId, patientId, doctorId } = job.data;
+        const appointment = await Appointment.findById(appointmentId)
+          .populate('patientId', 'name email')
+          .populate('doctorId', 'name');
 
-      if (type === 'booking_confirmation') {
+        if (appointment && appointment.patientId?.email) {
+          const approvedSummary = appointment.postVisitSummary?.patientSummary?.approvedText || appointment.postVisitSummary?.clinicalNotes;
+          await EmailService.sendEmail({
+            to: appointment.patientId.email,
+            subject: `Your Post-Visit Summary from Dr. ${appointment.doctorId?.name || 'Your Doctor'}`,
+            text: `Hello ${appointment.patientId.name},\n\nDr. ${appointment.doctorId?.name} has approved your post-visit summary:\n\n${approvedSummary}\n\nYou can also log into your VibeHealth portal to view full details.\n\nBest regards,\nVibeHealth Team`,
+            html: `<div style="font-family: sans-serif; line-height: 1.5;">
+              <h2>Your Post-Visit Summary</h2>
+              <p>Hello <strong>${appointment.patientId.name}</strong>,</p>
+              <p>Dr. ${appointment.doctorId?.name} has finalized your consultation summary:</p>
+              <div style="background-color: #f8fafc; border-left: 4px solid #0d9488; padding: 12px 16px; margin: 16px 0;">
+                <p style="white-space: pre-wrap; margin: 0;">${approvedSummary}</p>
+              </div>
+              <p>Log in to your <a href="http://localhost:5173/patient/dashboard">VibeHealth Portal</a> to view your prescription schedule and follow-up steps.</p>
+            </div>`,
+          });
+
+          await Appointment.findByIdAndUpdate(appointmentId, {
+            'postVisitSummary.patientSummaryEmailSentAt': new Date(),
+          });
+        }
+      } else if (type === 'booking_confirmation') {
         await EmailService.sendBookingConfirmation(payload);
       } else if (type === 'doctor_credentials') {
         await EmailService.sendDoctorCredentials(payload);

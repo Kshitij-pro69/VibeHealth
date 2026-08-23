@@ -213,6 +213,81 @@ export const PatientDashboard = () => {
                   </div>
                 )}
 
+                {/* Post-Visit Doctor-Approved Summary (Human-in-the-Loop Gate) */}
+                {apt.postVisitSummary?.doctorApproved && (
+                  <div className="p-4 bg-teal-50/80 border border-teal-200 rounded-2xl space-y-3 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-1.5 text-teal-900 font-bold">
+                        <CheckCircle2 className="w-4 h-4 text-teal-600" />
+                        <span>Physician Post-Visit Summary</span>
+                      </div>
+                      <Badge variant="success">APPROVED BY DR. {apt.doctorId?.name?.toUpperCase()}</Badge>
+                    </div>
+
+                    {/* Approved Text Narrative */}
+                    <div className="bg-white p-3 rounded-xl border border-teal-100 text-slate-800 leading-relaxed whitespace-pre-line">
+                      {apt.postVisitSummary.patientSummary?.approvedText ||
+                        apt.postVisitSummary.clinicalNotes}
+                    </div>
+
+                    {/* Medication Schedule Table */}
+                    {apt.postVisitSummary.patientSummary?.medicationSchedule?.length > 0 && (
+                      <div className="space-y-1.5">
+                        <p className="font-semibold text-teal-900 text-[11px] uppercase tracking-wide">Medication Schedule</p>
+                        <div className="bg-white rounded-xl border border-teal-100 overflow-hidden">
+                          <table className="w-full text-left border-collapse">
+                            <thead>
+                              <tr className="bg-teal-100/50 text-teal-900 text-[10px] uppercase font-bold border-b border-teal-100">
+                                <th className="p-2">Medication</th>
+                                <th className="p-2">Schedule</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-teal-50">
+                              {apt.postVisitSummary.patientSummary.medicationSchedule.map((m, idx) => (
+                                <tr key={idx} className="text-[11px]">
+                                  <td className="p-2 font-medium text-slate-900">{m.medication}</td>
+                                  <td className="p-2 text-slate-600">{m.schedule}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Prescriptions List Fallback */}
+                    {(!apt.postVisitSummary.patientSummary?.medicationSchedule?.length) &&
+                      apt.postVisitSummary.prescriptions?.length > 0 && (
+                        <div className="space-y-1">
+                          <p className="font-semibold text-teal-900 text-[11px] uppercase tracking-wide">Prescriptions</p>
+                          <div className="bg-white p-2.5 rounded-xl border border-teal-100 space-y-1">
+                            {apt.postVisitSummary.prescriptions.map((rx, idx) => (
+                              <p key={idx} className="text-slate-800">
+                                • <strong>{rx.medicationName}</strong> ({rx.dosage}) — {rx.frequency} for {rx.durationDays} days
+                              </p>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                    {/* Follow-up Steps */}
+                    {apt.postVisitSummary.patientSummary?.followUpSteps?.length > 0 && (
+                      <div className="space-y-1">
+                        <p className="font-semibold text-teal-900 text-[11px] uppercase tracking-wide">Follow-Up Steps</p>
+                        <ul className="bg-white p-2.5 rounded-xl border border-teal-100 space-y-1 text-slate-700">
+                          {apt.postVisitSummary.patientSummary.followUpSteps.map((step, idx) => (
+                            <li key={idx} className="flex items-start gap-1.5">
+                              <span className="text-teal-600 font-bold">•</span>
+                              {step}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+
                 {/* Doctor Unavailability Cancellation Banner & Action Buttons */}
                 {apt.status === 'cancelled' && (
                   <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl space-y-2 text-xs">
