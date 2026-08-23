@@ -6,6 +6,7 @@ import {
   getAppointmentById,
   cancelAppointment,
   updatePostVisitSummary,
+  retryAISummary,
   holdSlotSchema,
   confirmBookingSchema,
   postVisitSchema,
@@ -44,5 +45,8 @@ router.put(
   validateRequest(postVisitSchema),
   updatePostVisitSummary
 );
+
+// 7. Doctor retries AI pre-visit triage summary generation (failed or stale)
+router.post('/:id/retry-summary', requireDoctor, requireAppointmentOwnership, retryAISummary);
 
 export default router;

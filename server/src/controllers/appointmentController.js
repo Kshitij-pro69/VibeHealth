@@ -27,6 +27,12 @@ export const confirmBookingSchema = z.object({
   endTime: z.string().optional(),
   reasonForVisit: z.string().min(3, 'Reason for visit is required'),
   patientNotes: z.string().optional(),
+  // Structured symptom intake fields (collected during the hold window)
+  symptomDescription: z.string().max(2000).optional(),
+  symptomDuration: z.string().max(200).optional(),
+  symptomSeverity: z.number().int().min(1).max(10).optional().nullable(),
+  existingConditions: z.string().max(1000).optional(),
+  currentMedications: z.string().max(1000).optional(),
 });
 
 export const postVisitSchema = z.object({
@@ -173,7 +179,19 @@ export const holdSlot = async (req, res, next) => {
  */
 export const confirmAppointment = async (req, res, next) => {
   try {
-    const { doctorId, startTime, endTime, reasonForVisit, patientNotes, appointmentId: bodyApptId } = req.body;
+    const {
+      doctorId,
+      startTime,
+      endTime,
+      reasonForVisit,
+      patientNotes,
+      appointmentId: bodyApptId,
+      symptomDescription,
+      symptomDuration,
+      symptomSeverity,
+      existingConditions,
+      currentMedications,
+    } = req.body;
     const appointmentId = req.params.id || bodyApptId;
     const patientId = req.user._id;
 
@@ -217,12 +235,19 @@ export const confirmAppointment = async (req, res, next) => {
     const doctorUser = await User.findById(appointment.doctorId);
     const doctorProfile = await DoctorProfile.findOne({ userId: appointment.doctorId });
 
-    // Flip status to 'confirmed' and clear hold expiry
+    // Flip status to 'confirmed', persist structured intake, and initialise the AI pipeline status
     appointment.status = 'confirmed';
     appointment.reasonForVisit = reasonForVisit;
     appointment.patientNotes = patientNotes || '';
+    appointment.symptomDescription = symptomDescription || '';
+    appointment.symptomDuration = symptomDuration || '';
+    appointment.symptomSeverity = symptomSeverity ?? null;
+    appointment.existingConditions = existingConditions || '';
+    appointment.currentMedications = currentMedications || '';
     appointment.slotHoldExpiresAt = null;
     appointment.paymentStatus = 'paid';
+    // Mark the AI summary pipeline as pending — will be updated to 'completed' or 'failed' by the LLM worker
+    appointment.preVisitSummary = { status: 'pending' };
     await appointment.save();
 
     // Cancel pending BullMQ delayed release job
@@ -232,12 +257,16 @@ export const confirmAppointment = async (req, res, next) => {
     await SlotHoldService.releaseHold(appointment.doctorId, appointment.startTime);
 
     // Asynchronously dispatch BullMQ background jobs (NON-BLOCKING)
-    // 1. AI Pre-visit Triage Summary
+    // 1. AI Pre-visit Triage Summary (non-blocking — failure handled by BullMQ worker state machine)
     dispatchLLMSummaryJob('generate-previsit-triage', {
-      appointmentId: appointment._id,
-      doctorId: appointment.doctorId,
+      appointmentId: appointment._id.toString(),
+      doctorId: appointment.doctorId.toString(),
       reasonForVisit,
-      patientNotes: patientNotes || '',
+      symptomDescription: symptomDescription || '',
+      symptomDuration: symptomDuration || '',
+      symptomSeverity: symptomSeverity ?? null,
+      existingConditions: existingConditions || '',
+      currentMedications: currentMedications || '',
     });
 
     // 2. Google Calendar Sync Stub
@@ -383,6 +412,67 @@ export const updatePostVisitSummary = async (req, res, next) => {
       res,
       { postVisitSummary: appointment.postVisitSummary },
       'Post-visit clinical summary saved successfully'
+    );
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * 7. Retry AI Pre-Visit Summary (Doctor-only)
+ *
+ * Re-enqueues the LLM triage job for an appointment whose summary failed.
+ * Sets preVisitSummary.status back to 'pending', then dispatches a fresh BullMQ job.
+ * The appointment status (confirmed/completed) is never touched.
+ *
+ * Accessible by: the doctor assigned to this appointment (requireAppointmentOwnership + requireDoctor)
+ */
+export const retryAISummary = async (req, res, next) => {
+  try {
+    const appointment = req.appointment;
+
+    if (!appointment) {
+      return ApiResponse.error(res, 'Appointment not found.', 404);
+    }
+
+    // Allow retry from either 'failed' or 'completed' state (doctor may want a fresh summary)
+    const allowedStatuses = ['failed', 'completed', 'pending'];
+    const currentSummaryStatus = appointment.preVisitSummary?.status;
+    if (!allowedStatuses.includes(currentSummaryStatus)) {
+      return ApiResponse.error(
+        res,
+        `Cannot retry AI summary from current state: ${currentSummaryStatus}.`,
+        409
+      );
+    }
+
+    // Reset pipeline status to 'pending'
+    await Appointment.findByIdAndUpdate(appointment._id, {
+      'preVisitSummary.status': 'pending',
+      'preVisitSummary.urgency': null,
+      'preVisitSummary.chiefComplaint': '',
+      'preVisitSummary.suggestedQuestions': [],
+      'preVisitSummary.aiGeneratedAt': null,
+    });
+
+    // Re-enqueue the LLM job with the existing structured intake data
+    await dispatchLLMSummaryJob('retry-previsit-triage', {
+      appointmentId: appointment._id.toString(),
+      doctorId: appointment.doctorId.toString(),
+      reasonForVisit: appointment.reasonForVisit || '',
+      symptomDescription: appointment.symptomDescription || '',
+      symptomDuration: appointment.symptomDuration || '',
+      symptomSeverity: appointment.symptomSeverity ?? null,
+      existingConditions: appointment.existingConditions || '',
+      currentMedications: appointment.currentMedications || '',
+    });
+
+    logger.info(`AI summary retry dispatched for appointment #${appointment._id}`);
+
+    return ApiResponse.success(
+      res,
+      { summaryStatus: 'pending' },
+      'AI summary retry queued. The triage summary will be regenerated shortly.'
     );
   } catch (error) {
     next(error);

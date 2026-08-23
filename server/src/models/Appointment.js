@@ -2,20 +2,20 @@ import mongoose from 'mongoose';
 
 const preVisitSummarySchema = new mongoose.Schema(
   {
-    disclaimer: {
+    // Pipeline status — set to 'pending' at booking confirmation time;
+    // updated to 'completed' or 'failed' by the BullMQ LLM worker.
+    status: {
       type: String,
-      default: 'Clinician-Reference Triage Assistance only. Not authoritative medical advice.',
+      enum: ['pending', 'completed', 'failed'],
+      default: 'pending',
     },
-    symptoms: {
-      type: [String],
-      default: [],
-    },
-    severity: {
+    // AI-generated fields (populated only when status === 'completed')
+    urgency: {
       type: String,
-      enum: ['low', 'moderate', 'high', 'emergency', 'unknown'],
-      default: 'unknown',
+      enum: ['Low', 'Medium', 'High'],
+      default: null,
     },
-    triageNotes: {
+    chiefComplaint: {
       type: String,
       default: '',
     },
@@ -25,6 +25,15 @@ const preVisitSummarySchema = new mongoose.Schema(
     },
     aiGeneratedAt: {
       type: Date,
+    },
+    disclaimer: {
+      type: String,
+      default: 'Clinician-Reference Triage Assistance only. Not authoritative medical advice.',
+    },
+    // Verbatim patient symptom text — preserved for fallback display on AI failure
+    rawSymptomText: {
+      type: String,
+      default: '',
     },
   },
   { _id: false }
@@ -105,6 +114,37 @@ const appointmentSchema = new mongoose.Schema(
     patientNotes: {
       type: String,
       trim: true,
+      default: '',
+    },
+    // --- Structured patient symptom intake (collected during hold window before confirmation) ---
+    symptomDescription: {
+      type: String,
+      trim: true,
+      maxlength: 2000,
+      default: '',
+    },
+    symptomDuration: {
+      type: String,
+      trim: true,
+      maxlength: 200,
+      default: '',
+    },
+    symptomSeverity: {
+      type: Number,
+      min: 1,
+      max: 10,
+      default: null,
+    },
+    existingConditions: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
+      default: '',
+    },
+    currentMedications: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
       default: '',
     },
     preVisitSummary: {

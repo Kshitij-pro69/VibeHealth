@@ -73,6 +73,13 @@ export const DoctorDetail = () => {
   const [bookingLoading, setBookingLoading] = useState(false);
   const [reasonForVisit, setReasonForVisit] = useState('');
   const [patientNotes, setPatientNotes] = useState('');
+  // Structured symptom intake
+  const [symptomDescription, setSymptomDescription] = useState('');
+  const [symptomDuration, setSymptomDuration] = useState('');
+  const [symptomSeverity, setSymptomSeverity] = useState(5);
+  const [existingConditions, setExistingConditions] = useState('');
+  const [currentMedications, setCurrentMedications] = useState('');
+
 
   // --- Fetch profile ---
   useEffect(() => {
@@ -176,6 +183,11 @@ export const DoctorDetail = () => {
         endTime: selectedSlot.endTime,
         reasonForVisit,
         patientNotes,
+        symptomDescription,
+        symptomDuration,
+        symptomSeverity: symptomSeverity ? Number(symptomSeverity) : null,
+        existingConditions,
+        currentMedications,
       });
       if (res.success) {
         clearInterval(holdInterval);
@@ -430,6 +442,11 @@ export const DoctorDetail = () => {
                   setSelectedSlot(null);
                   setReasonForVisit('');
                   setPatientNotes('');
+                  setSymptomDescription('');
+                  setSymptomDuration('');
+                  setSymptomSeverity(5);
+                  setExistingConditions('');
+                  setCurrentMedications('');
                 }}
               >
                 Book Another Slot
@@ -454,6 +471,21 @@ export const DoctorDetail = () => {
                 </div>
               )}
 
+              {/* ⚠️ Emergency Safety Notice — always visible above the form */}
+              <div className="flex items-start gap-3 p-3 bg-rose-50/80 border border-rose-200 rounded-xl">
+                <AlertTriangle className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" />
+                <div className="text-[11px] leading-relaxed text-rose-800">
+                  <strong>Not a diagnostic tool.</strong> The information below is for your
+                  physician&apos;s pre-consultation reference only. It is not reviewed in real
+                  time and does not constitute medical advice.{' '}
+                  <strong>
+                    If you are experiencing a medical emergency, call emergency services (112 /
+                    102) immediately. Do not book an appointment.
+                  </strong>
+                </div>
+              </div>
+
+              {/* Reason for Visit */}
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-slate-700">
                   Reason for Visit <span className="text-rose-500">*</span>
@@ -468,16 +500,96 @@ export const DoctorDetail = () => {
                 />
               </div>
 
+              {/* Symptom Description */}
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-slate-700">
-                  Pre-Visit Notes{' '}
-                  <span className="font-normal text-slate-400">(used for AI triage assistance)</span>
+                  Symptom Description <span className="text-rose-500">*</span>
                 </label>
                 <textarea
                   rows={3}
-                  value={patientNotes}
-                  onChange={(e) => setPatientNotes(e.target.value)}
-                  placeholder="Describe symptoms, their duration, current medications, allergies…"
+                  required
+                  value={symptomDescription}
+                  onChange={(e) => setSymptomDescription(e.target.value)}
+                  placeholder="Describe your symptoms in your own words. e.g. Sharp chest pain on the left side, worse when lying down…"
+                  className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500/30 focus:border-teal-500 transition resize-none"
+                />
+              </div>
+
+              {/* Duration + Severity row */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Duration */}
+                <div className="space-y-1.5">
+                  <label className="text-xs font-semibold text-slate-700">
+                    Duration
+                  </label>
+                  <input
+                    type="text"
+                    value={symptomDuration}
+                    onChange={(e) => setSymptomDuration(e.target.value)}
+                    placeholder="e.g. 3 days, since last week"
+                    className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500/30 focus:border-teal-500 transition"
+                  />
+                </div>
+
+                {/* Severity Slider */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-slate-700">
+                      Severity
+                    </label>
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                      symptomSeverity <= 3
+                        ? 'bg-emerald-100 text-emerald-700'
+                        : symptomSeverity <= 6
+                        ? 'bg-amber-100 text-amber-700'
+                        : 'bg-rose-100 text-rose-700'
+                    }`}>
+                      {symptomSeverity}/10
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={1}
+                    max={10}
+                    step={1}
+                    value={symptomSeverity}
+                    onChange={(e) => setSymptomSeverity(Number(e.target.value))}
+                    className="w-full h-2 rounded-full appearance-none cursor-pointer accent-teal-600"
+                  />
+                  <div className="flex justify-between text-[10px] text-slate-400">
+                    <span>Mild (1)</span>
+                    <span>Moderate (5)</span>
+                    <span>Severe (10)</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Existing Conditions */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-700">
+                  Existing Medical Conditions{' '}
+                  <span className="font-normal text-slate-400">(optional)</span>
+                </label>
+                <textarea
+                  rows={2}
+                  value={existingConditions}
+                  onChange={(e) => setExistingConditions(e.target.value)}
+                  placeholder="e.g. Type 2 Diabetes, Hypertension, Asthma…"
+                  className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500/30 focus:border-teal-500 transition resize-none"
+                />
+              </div>
+
+              {/* Current Medications */}
+              <div className="space-y-1.5">
+                <label className="text-xs font-semibold text-slate-700">
+                  Current Medications{' '}
+                  <span className="font-normal text-slate-400">(optional)</span>
+                </label>
+                <textarea
+                  rows={2}
+                  value={currentMedications}
+                  onChange={(e) => setCurrentMedications(e.target.value)}
+                  placeholder="e.g. Metformin 500mg twice daily, Amlodipine 5mg…"
                   className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-teal-500/30 focus:border-teal-500 transition resize-none"
                 />
               </div>
