@@ -3,6 +3,10 @@ import { User } from '../models/User.js';
 import { DoctorProfile } from '../models/DoctorProfile.js';
 import { Leave } from '../models/Leave.js';
 import { Appointment } from '../models/Appointment.js';
+import { Notification } from '../models/Notification.js';
+import { SlotHoldService } from '../services/slotHoldService.js';
+import { dispatchEmailJob, dispatchCalendarSyncJob } from '../jobs/queue.js';
+import { config } from '../config/env.js';
 import { ApiResponse } from '../utils/apiResponse.js';
 
 export const updateScheduleSchema = z.object({
@@ -23,9 +27,11 @@ export const updateScheduleSchema = z.object({
 });
 
 export const createLeaveSchema = z.object({
-  startDate: z.string().datetime(),
-  endDate: z.string().datetime(),
+  doctorId: z.string().optional(),
+  startDate: z.string(),
+  endDate: z.string(),
   reason: z.string().optional(),
+  confirmCancelBookings: z.boolean().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -310,22 +316,200 @@ export const updateDoctorProfile = async (req, res, next) => {
 };
 
 /**
- * 5. Submit Doctor Leave
+ * 5. Preview Leave Conflicts (Checks for existing booked appointments before submitting leave)
+ */
+export const previewLeaveConflicts = async (req, res, next) => {
+  try {
+    const { startDate, endDate, doctorId: bodyDocId } = req.body;
+    const targetDoctorId = req.user.role === 'admin' && bodyDocId ? bodyDocId : req.user._id;
+
+    const start = new Date(startDate);
+    start.setHours(0, 0, 0, 0);
+
+    const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999);
+
+    const conflictingAppointments = await Appointment.find({
+      doctorId: targetDoctorId,
+      status: { $in: ['held', 'confirmed'] },
+      startTime: { $lte: end },
+      endTime: { $gte: start },
+    })
+      .populate('patientId', 'name email phone avatar')
+      .sort({ startTime: 1 })
+      .lean();
+
+    return ApiResponse.success(res, {
+      count: conflictingAppointments.length,
+      appointments: conflictingAppointments,
+      startDate: start.toISOString(),
+      endDate: end.toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * 6. Submit Doctor Leave with Mandatory Conflict Safeguard
  */
 export const requestLeave = async (req, res, next) => {
   try {
-    const { startDate, endDate, reason } = req.body;
-    const doctorId = req.user._id;
+    const { startDate, endDate, reason, confirmCancelBookings, doctorId: bodyDocId } = req.body;
+    const targetDoctorId = req.user.role === 'admin' && bodyDocId ? bodyDocId : req.user._id;
 
+    const start = new Date(startDate);
+    start.setHours(0, 0, 0, 0);
+
+    const end = new Date(endDate);
+    end.setHours(23, 59, 59, 999);
+
+    // Find all active/confirmed appointments falling in this date range
+    const conflictingAppointments = await Appointment.find({
+      doctorId: targetDoctorId,
+      status: { $in: ['held', 'confirmed'] },
+      startTime: { $lte: end },
+      endTime: { $gte: start },
+    }).populate('patientId', 'name email phone');
+
+    // NEVER silently destroy bookings — if conflicts exist and confirmCancelBookings is false, require confirmation
+    if (conflictingAppointments.length > 0 && !confirmCancelBookings) {
+      return ApiResponse.error(
+        res,
+        `You have ${conflictingAppointments.length} appointment(s) on these dates. Marking leave will cancel them and notify the patients. Confirmation required.`,
+        409,
+        {
+          requiresConfirmation: true,
+          count: conflictingAppointments.length,
+          appointments: conflictingAppointments.map((a) => ({
+            _id: a._id,
+            patientName: a.patientId?.name,
+            startTime: a.startTime,
+            endTime: a.endTime,
+          })),
+        }
+      );
+    }
+
+    // Save the Leave document
     const leave = await Leave.create({
-      doctorId,
-      startDate: new Date(startDate),
-      endDate: new Date(endDate),
-      reason,
-      status: 'approved', // Auto-approved for now
+      doctorId: targetDoctorId,
+      startDate: start,
+      endDate: end,
+      reason: reason || '',
+      status: 'approved',
     });
 
-    return ApiResponse.created(res, { leave }, 'Leave recorded successfully');
+    const doctorUser = await User.findById(targetDoctorId);
+
+    // On confirmation (or 0 conflicts): cancel affected appointments & notify patients
+    for (const apt of conflictingAppointments) {
+      apt.status = 'cancelled';
+      apt.cancellationReason = 'doctor_unavailable';
+      apt.cancelledAt = new Date();
+      apt.slotHoldExpiresAt = null;
+      await apt.save();
+
+      // Release any Redis slot lock
+      await SlotHoldService.releaseHold(targetDoctorId, apt.startTime);
+
+      // 1. Create in-app Notification for patient
+      if (apt.patientId?._id) {
+        const aptDateStr = new Date(apt.startTime).toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+        });
+
+        await Notification.create({
+          userId: apt.patientId._id,
+          type: 'appointment_cancelled',
+          title: 'Appointment Cancelled - Doctor Unavailable',
+          message: `Your appointment on ${aptDateStr} with Dr. ${doctorUser?.name || 'Doctor'} was cancelled because the physician is unavailable. Click to rebook.`,
+          metadata: { appointmentId: apt._id, doctorId: targetDoctorId },
+        });
+      }
+
+      // 2. Dispatch cancellation email via BullMQ
+      if (apt.patientId?.email) {
+        dispatchEmailJob('send-booking-cancellation', {
+          type: 'booking_cancellation',
+          payload: {
+            to: apt.patientId.email,
+            patientName: apt.patientId.name,
+            doctorName: doctorUser?.name || 'Doctor',
+            startTime: apt.startTime,
+            cancellationReason: 'doctor_unavailable',
+            rebookUrl: `${config.clientUrl}/patient/doctors/${targetDoctorId}`,
+          },
+        });
+      }
+
+      // 3. Dispatch Google Calendar event deletion via BullMQ
+      if (apt.calendarEventId) {
+        dispatchCalendarSyncJob('cancel-calendar-event', {
+          action: 'delete_event',
+          appointmentId: apt._id,
+          doctorId: targetDoctorId,
+          eventDetails: { eventId: apt.calendarEventId },
+        });
+      }
+    }
+
+    return ApiResponse.created(
+      res,
+      {
+        leave,
+        cancelledAppointmentsCount: conflictingAppointments.length,
+      },
+      `Leave schedule recorded successfully. ${conflictingAppointments.length} appointment(s) cancelled and patients notified.`
+    );
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * 7. Get Doctor Leaves
+ */
+export const getDoctorLeaves = async (req, res, next) => {
+  try {
+    const targetDoctorId =
+      req.user.role === 'admin' && req.query.doctorId ? req.query.doctorId : req.user._id;
+
+    const leaves = await Leave.find({ doctorId: targetDoctorId }).sort({ startDate: -1 }).lean();
+
+    return ApiResponse.success(res, { leaves });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * 8. Remove/Delete Doctor Leave Record
+ * NOTE: Deleting a leave record opens future slot availability but does NOT restore cancelled appointments.
+ */
+export const deleteLeave = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const leave = await Leave.findById(id);
+
+    if (!leave) {
+      return ApiResponse.error(res, 'Leave record not found', 404);
+    }
+
+    // Role & Ownership check
+    if (req.user.role === 'doctor' && leave.doctorId.toString() !== req.user._id.toString()) {
+      return ApiResponse.error(res, 'Unauthorized to delete this leave record', 403);
+    }
+
+    await Leave.findByIdAndDelete(id);
+
+    return ApiResponse.success(
+      res,
+      { id },
+      'Leave schedule removed successfully. Note: Previously cancelled appointments remain cancelled.'
+    );
   } catch (error) {
     next(error);
   }

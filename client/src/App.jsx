@@ -12,6 +12,7 @@ import { PatientDashboard } from './pages/patient/PatientDashboard';
 import { DoctorSearch } from './pages/patient/DoctorSearch';
 import { DoctorDetail } from './pages/patient/DoctorDetail';
 import { DoctorDashboard } from './pages/doctor/DoctorDashboard';
+import { DoctorLeaves } from './pages/doctor/DoctorLeaves';
 import { AdminDashboard } from './pages/admin/AdminDashboard';
 import { DoctorManagement } from './pages/admin/DoctorManagement';
 import { NotFound } from './pages/NotFound';
@@ -45,7 +46,7 @@ function App() {
             <Route element={<DashboardLayout />}>
               <Route path="/doctor" element={<DoctorDashboard />} />
               <Route path="/doctor/schedule" element={<DoctorDashboard />} />
-              <Route path="/doctor/leaves" element={<DoctorDashboard />} />
+              <Route path="/doctor/leaves" element={<DoctorLeaves />} />
               <Route path="/doctor/profile" element={<DoctorDashboard />} />
             </Route>
           </Route>

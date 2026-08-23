@@ -3,14 +3,17 @@ import {
   listDoctors,
   getDoctorById,
   getAvailability,
-  getDoctorSlots,   // alias for getAvailability — backward compat
+  getDoctorSlots,
   updateDoctorProfile,
+  previewLeaveConflicts,
   requestLeave,
+  getDoctorLeaves,
+  deleteLeave,
   updateScheduleSchema,
   createLeaveSchema,
 } from '../controllers/doctorController.js';
 import { authenticate } from '../middleware/auth.js';
-import { requireDoctor } from '../middleware/rbac.js';
+import { requireDoctor, requireDoctorOrAdmin } from '../middleware/rbac.js';
 import { validateRequest } from '../middleware/validate.js';
 
 const router = Router();
@@ -22,12 +25,16 @@ router.get('/', listDoctors);
 router.get('/:id/profile', getDoctorById);
 
 // Public: Compute available slots on the fly
-// Both paths point to the same handler for backward compatibility
 router.get('/:id/slots', getDoctorSlots);
 router.get('/:doctorId/availability', getAvailability);
 
-// Doctor Only: Update schedule & profile
+// Doctor & Admin: Profile updates and Leave schedule management
 router.put('/profile', authenticate, requireDoctor, validateRequest(updateScheduleSchema), updateDoctorProfile);
-router.post('/leave', authenticate, requireDoctor, validateRequest(createLeaveSchema), requestLeave);
+
+// Leave management endpoints
+router.get('/leave', authenticate, requireDoctorOrAdmin, getDoctorLeaves);
+router.post('/leave/preview', authenticate, requireDoctorOrAdmin, previewLeaveConflicts);
+router.post('/leave', authenticate, requireDoctorOrAdmin, validateRequest(createLeaveSchema), requestLeave);
+router.delete('/leave/:id', authenticate, requireDoctorOrAdmin, deleteLeave);
 
 export default router;

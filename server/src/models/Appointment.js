@@ -132,6 +132,14 @@ const appointmentSchema = new mongoose.Schema(
       enum: ['pending', 'paid', 'refunded'],
       default: 'pending',
     },
+    cancellationReason: {
+      type: String,
+      default: null,
+    },
+    cancelledAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../api/axios';
 import { Card } from '../../components/common/Card';
@@ -9,6 +10,7 @@ import { Calendar, Clock, User, Sparkles, CheckCircle2, AlertCircle, Plus } from
 
 export const PatientDashboard = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [appointments, setAppointments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showBookingModal, setShowBookingModal] = useState(false);
@@ -208,6 +210,43 @@ export const PatientDashboard = () => {
                         {apt.preVisitSummary.symptoms.join(', ')}
                       </span>
                     </p>
+                  </div>
+                )}
+
+                {/* Doctor Unavailability Cancellation Banner & Action Buttons */}
+                {apt.status === 'cancelled' && (
+                  <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl space-y-2 text-xs">
+                    <div className="flex items-center gap-1.5 text-amber-900 font-semibold">
+                      <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                      <span>
+                        {apt.cancellationReason === 'doctor_unavailable'
+                          ? 'Cancelled Due to Physician Unavailability'
+                          : 'Appointment Cancelled'}
+                      </span>
+                    </div>
+                    <p className="text-amber-800 text-[11px] leading-relaxed">
+                      {apt.cancellationReason === 'doctor_unavailable'
+                        ? 'The physician was required to adjust their schedule. You can immediately choose a new date or book with another specialist.'
+                        : 'This consultation schedule was cancelled.'}
+                    </p>
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      {apt.doctorId?._id && (
+                        <button
+                          onClick={() => navigate(`/patient/doctors/${apt.doctorId._id}`)}
+                          className="px-2.5 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-semibold text-[11px] flex items-center gap-1 transition"
+                        >
+                          <Calendar className="w-3 h-3" />
+                          Rebook Different Date
+                        </button>
+                      )}
+                      <button
+                        onClick={() => navigate('/patient/doctors')}
+                        className="px-2.5 py-1.5 bg-white border border-amber-300 text-amber-900 hover:bg-amber-100 rounded-lg font-semibold text-[11px] flex items-center gap-1 transition"
+                      >
+                        <User className="w-3 h-3" />
+                        Rebook with Another Doctor
+                      </button>
+                    </div>
                   </div>
                 )}
 
