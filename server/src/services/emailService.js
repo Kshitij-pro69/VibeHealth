@@ -84,4 +84,35 @@ export class EmailService {
       html,
     });
   }
+
+  /**
+   * Helper: Doctor Onboarding & Login Credentials Template
+   */
+  static async sendDoctorCredentials({ to, doctorName, email, temporaryPassword, specialty, consultationFee }) {
+    const html = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;">
+        <h2 style="color: #0f766e; margin-top: 0;">Welcome to VibeHealth Medical Network 🩺</h2>
+        <p>Dear <strong>Dr. ${doctorName}</strong>,</p>
+        <p>Your physician profile has been created by the system administrator.</p>
+        
+        <div style="background-color: #f8fafc; padding: 16px; border: 1px solid #e2e8f0; margin: 20px 0; border-radius: 6px;">
+          <h3 style="margin-top: 0; color: #334155; font-size: 14px;">Your Account Credentials:</h3>
+          <p style="margin: 6px 0;"><strong>Portal Login Email:</strong> ${email}</p>
+          <p style="margin: 6px 0;"><strong>Temporary Password:</strong> <code style="background: #e2e8f0; padding: 2px 6px; border-radius: 4px; font-weight: bold; color: #0f766e;">${temporaryPassword}</code></p>
+          <p style="margin: 6px 0;"><strong>Specialty:</strong> ${specialty || 'General Practice'}</p>
+          <p style="margin: 6px 0;"><strong>Consultation Fee:</strong> ₹${consultationFee || 50}</p>
+        </div>
+
+        <p>Please log in at <a href="${config.clientUrl}/login" style="color: #0f766e; font-weight: bold;">${config.clientUrl}/login</a> to access your consultation schedule, review AI triage summaries, and manage clinical documentation.</p>
+        <p style="color: #64748b; font-size: 12px; margin-top: 30px;">For security, please change your password after logging in.</p>
+      </div>
+    `;
+
+    return this.sendEmail({
+      to,
+      subject: 'Your VibeHealth Physician Account Credentials',
+      text: `Dear Dr. ${doctorName},\n\nYour VibeHealth physician account has been created.\nLogin: ${email}\nTemporary Password: ${temporaryPassword}\n\nLogin at: ${config.clientUrl}/login`,
+      html,
+    });
+  }
 }

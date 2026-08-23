@@ -56,6 +56,8 @@ export const startWorkers = () => {
 
       if (type === 'booking_confirmation') {
         await EmailService.sendBookingConfirmation(payload);
+      } else if (type === 'doctor_credentials') {
+        await EmailService.sendDoctorCredentials(payload);
       } else {
         await EmailService.sendEmail(payload);
       }

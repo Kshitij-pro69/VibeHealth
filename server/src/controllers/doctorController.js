@@ -28,6 +28,76 @@ export const createLeaveSchema = z.object({
   reason: z.string().optional(),
 });
 
+// ---------------------------------------------------------------------------
+// TIMEZONE UTILITIES
+//
+// STRATEGY: All dates are stored in UTC in MongoDB. The workingHours fields
+// (e.g. startTime: "09:00", endTime: "17:00") represent the CLINIC'S LOCAL
+// time — not UTC. The `date` query param is a calendar date in the user's
+// local timezone (e.g. "2026-08-24").
+//
+// To avoid the classic off-by-one-day bug:
+//   ❌ WRONG: new Date("2026-08-24")       → midnight UTC → wrong local day
+//   ❌ WRONG: .setHours(9, 0, 0, 0)        → sets UTC hours, not local hours
+//   ✅ RIGHT: interpret "2026-08-24 09:00" in the clinic TZ → convert to UTC
+//
+// We use the IANA timezone name (default: "Asia/Kolkata" = IST = UTC+5:30).
+// We compute the UTC offset for the given date using Intl.DateTimeFormat, then
+// build UTC Date objects from the local HH:MM strings + offset.
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the UTC offset in minutes for a given IANA timezone name on a given date.
+ * e.g. getUtcOffsetMinutes('Asia/Kolkata') → 330 (IST = UTC+5:30)
+ */
+function getUtcOffsetMinutes(tz) {
+  // Use a reference UTC date to compute local offset
+  const now = new Date();
+  const utcStr = now.toLocaleString('en-US', { timeZone: 'UTC' });
+  const localStr = now.toLocaleString('en-US', { timeZone: tz });
+  const utcDate = new Date(utcStr);
+  const localDate = new Date(localStr);
+  return (localDate - utcDate) / 60000; // minutes
+}
+
+/**
+ * Given a local calendar date string "YYYY-MM-DD" and a timezone name,
+ * returns a UTC Date object representing midnight of that local date.
+ * e.g. localMidnightUTC("2026-08-24", "Asia/Kolkata") → 2026-08-23T18:30:00.000Z
+ */
+function localMidnightUTC(dateStr, tz) {
+  const offsetMinutes = getUtcOffsetMinutes(tz);
+  // Parse date components safely (avoid new Date(string) month ambiguity)
+  const [year, month, day] = dateStr.split('-').map(Number);
+  // Midnight in local time = "YYYY-MM-DDT00:00:00" local
+  // → UTC = midnight local - offsetMinutes
+  const midnightLocal = Date.UTC(year, month - 1, day, 0, 0, 0, 0);
+  return new Date(midnightLocal - offsetMinutes * 60000);
+}
+
+/**
+ * Given a date string "YYYY-MM-DD" and a time string "HH:MM" in a local tz,
+ * returns the corresponding UTC Date object.
+ */
+function localTimeToUTC(dateStr, timeStr, tz) {
+  const offsetMinutes = getUtcOffsetMinutes(tz);
+  const [year, month, day] = dateStr.split('-').map(Number);
+  const [hour, minute] = timeStr.split(':').map(Number);
+  const localTs = Date.UTC(year, month - 1, day, hour, minute, 0, 0);
+  return new Date(localTs - offsetMinutes * 60000);
+}
+
+/**
+ * Given a UTC Date and a timezone name, returns the local day-of-week (0=Sun, 6=Sat).
+ * Uses Intl to determine what day it is in the local timezone.
+ */
+function getLocalDayOfWeek(utcDate, tz) {
+  const localDayName = utcDate.toLocaleDateString('en-US', { timeZone: tz, weekday: 'short' });
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(localDayName);
+}
+
+// ---------------------------------------------------------------------------
+
 /**
  * 1. List Public Doctor Profiles
  */
@@ -58,92 +128,164 @@ export const listDoctors = async (req, res, next) => {
 };
 
 /**
- * 2. Get Doctor Details & Available Slots for a given Date
+ * 2. Get a single doctor's public profile (no slots)
  */
-export const getDoctorSlots = async (req, res, next) => {
+export const getDoctorById = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { date } = req.query; // YYYY-MM-DD format
+    const profile = await DoctorProfile.findOne({ userId: id })
+      .populate('userId', 'name email phone avatar')
+      .lean();
 
-    const targetDate = date ? new Date(date) : new Date();
-    const dayOfWeek = targetDate.getDay();
+    if (!profile) {
+      return ApiResponse.error(res, 'Doctor not found', 404);
+    }
 
-    const doctorProfile = await DoctorProfile.findOne({ userId: id }).populate('userId', 'name email avatar');
+    return ApiResponse.success(res, { doctor: profile });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * 3. Compute available slots for a doctor on a given date (on-the-fly, never stored).
+ *
+ * Query params:
+ *   date  — YYYY-MM-DD in the clinic's local timezone (default: today)
+ *   tz    — IANA timezone name (default: "Asia/Kolkata")
+ *
+ * Algorithm:
+ *   1. Convert date string to local midnight UTC, determine local day-of-week.
+ *   2. Look up workingHours config for that day. If none → return [].
+ *   3. Convert startTime/endTime HH:MM to UTC Date objects.
+ *   4. Check for approved Leave overlapping that UTC day window → return [] if found.
+ *   5. Fetch held/confirmed Appointments in that UTC window.
+ *   6. Generate candidate slots stepping by (slotDurationMinutes + bufferMinutes).
+ *   7. For each candidate, remove if: exact startTime is booked, or slot is in the past.
+ *   8. Return remaining slots with ISO startTime/endTime.
+ */
+export const getAvailability = async (req, res, next) => {
+  try {
+    // Accept both /slots and /availability param names
+    const doctorUserId = req.params.doctorId || req.params.id;
+    const tz = req.query.tz || 'Asia/Kolkata';
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: tz }); // "YYYY-MM-DD"
+    const dateStr = req.query.date || today;
+
+    // Validate date format
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+      return ApiResponse.error(res, 'Invalid date format. Use YYYY-MM-DD.', 400);
+    }
+
+    // --- Step 1: Resolve timezone boundaries ---
+    // localMidnightUTC gives us the UTC instant that corresponds to 00:00:00 local time.
+    const dayStartUTC = localMidnightUTC(dateStr, tz);
+    const dayEndUTC = new Date(dayStartUTC.getTime() + 24 * 60 * 60 * 1000 - 1); // 23:59:59.999 local
+    const localDayOfWeek = getLocalDayOfWeek(dayStartUTC, tz);
+
+    // --- Step 2: Load doctor profile ---
+    const doctorProfile = await DoctorProfile.findOne({ userId: doctorUserId })
+      .populate('userId', 'name email phone avatar')
+      .lean();
+
     if (!doctorProfile) {
       return ApiResponse.error(res, 'Doctor profile not found', 404);
     }
 
-    // Check if doctor is on leave
-    const startOfDay = new Date(targetDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(targetDate);
-    endOfDay.setHours(23, 59, 59, 999);
-
-    const onLeave = await Leave.findOne({
-      doctorId: id,
-      status: 'approved',
-      startDate: { $lte: endOfDay },
-      endDate: { $gte: startOfDay },
-    });
-
-    if (onLeave) {
-      return ApiResponse.success(res, {
-        doctor: doctorProfile,
-        date: targetDate.toISOString().split('T')[0],
-        onLeave: true,
-        slots: [],
-      });
-    }
-
-    // Find working hours for this day of week
-    const dayConfig = doctorProfile.workingHours.find((wh) => wh.dayOfWeek === dayOfWeek);
+    // --- Step 3: Find working hours config for this local day ---
+    const dayConfig = doctorProfile.workingHours.find((wh) => wh.dayOfWeek === localDayOfWeek);
     if (!dayConfig) {
       return ApiResponse.success(res, {
         doctor: doctorProfile,
-        date: targetDate.toISOString().split('T')[0],
+        date: dateStr,
+        dayOfWeek: localDayOfWeek,
+        timezone: tz,
         onLeave: false,
+        reason: 'No working hours configured for this day',
         slots: [],
       });
     }
 
-    // Generate potential time slots
-    const [startHour, startMinute] = dayConfig.startTime.split(':').map(Number);
-    const [endHour, endMinute] = dayConfig.endTime.split(':').map(Number);
-    const duration = dayConfig.slotDurationMinutes || 30;
-
-    const slots = [];
-    let currentSlotStart = new Date(targetDate);
-    currentSlotStart.setHours(startHour, startMinute, 0, 0);
-
-    const shiftEnd = new Date(targetDate);
-    shiftEnd.setHours(endHour, endMinute, 0, 0);
-
-    // Fetch existing booked appointments for the day
-    const bookedAppointments = await Appointment.find({
-      doctorId: id,
-      status: { $in: ['held', 'confirmed'] },
-      startTime: { $gte: startOfDay, $lte: endOfDay },
+    // --- Step 4: Check for approved leave covering this local calendar day ---
+    const leave = await Leave.findOne({
+      doctorId: doctorUserId,
+      status: 'approved',
+      startDate: { $lte: dayEndUTC },
+      endDate: { $gte: dayStartUTC },
     }).lean();
 
-    const bookedTimes = new Set(bookedAppointments.map((a) => new Date(a.startTime).toISOString()));
-
-    while (currentSlotStart.getTime() + duration * 60000 <= shiftEnd.getTime()) {
-      const slotEnd = new Date(currentSlotStart.getTime() + duration * 60000);
-      const isBooked = bookedTimes.has(currentSlotStart.toISOString());
-
-      slots.push({
-        startTime: currentSlotStart.toISOString(),
-        endTime: slotEnd.toISOString(),
-        isAvailable: !isBooked,
+    if (leave) {
+      return ApiResponse.success(res, {
+        doctor: doctorProfile,
+        date: dateStr,
+        dayOfWeek: localDayOfWeek,
+        timezone: tz,
+        onLeave: true,
+        reason: leave.reason || 'Doctor is on approved leave',
+        slots: [],
       });
+    }
 
-      currentSlotStart = new Date(currentSlotStart.getTime() + duration * 60000);
+    // --- Step 5: Convert working hours to UTC Date objects ---
+    const shiftStartUTC = localTimeToUTC(dateStr, dayConfig.startTime, tz);
+    const shiftEndUTC = localTimeToUTC(dateStr, dayConfig.endTime, tz);
+    const duration = dayConfig.slotDurationMinutes ?? doctorProfile.slotDurationMinutes ?? 30;
+    const buffer = dayConfig.bufferMinutes ?? doctorProfile.bufferMinutes ?? 0;
+    const stepMs = (duration + buffer) * 60000;
+    const durationMs = duration * 60000;
+
+    // --- Step 6: Load existing held/confirmed appointments for that UTC window ---
+    const bookedAppointments = await Appointment.find({
+      doctorId: doctorUserId,
+      status: { $in: ['held', 'confirmed'] },
+      startTime: { $gte: dayStartUTC, $lte: dayEndUTC },
+    }).lean();
+
+    // Build a Set of booked start times (ISO strings) for O(1) lookup
+    const bookedStartTimes = new Set(
+      bookedAppointments.map((a) => new Date(a.startTime).toISOString())
+    );
+
+    // Current wall-clock UTC time — used to prune past slots when querying today
+    const nowUTC = new Date();
+    const isToday = dateStr === today;
+
+    // --- Step 7: Generate candidate slots and apply filters ---
+    const slots = [];
+    let cursor = new Date(shiftStartUTC.getTime());
+
+    while (cursor.getTime() + durationMs <= shiftEndUTC.getTime()) {
+      const slotStart = new Date(cursor.getTime());
+      const slotEnd = new Date(cursor.getTime() + durationMs);
+
+      const isBooked = bookedStartTimes.has(slotStart.toISOString());
+      // Prune past slots: if today and slot start has already passed
+      const isPast = isToday && slotStart.getTime() <= nowUTC.getTime();
+
+      if (!isBooked && !isPast) {
+        slots.push({
+          startTime: slotStart.toISOString(),
+          endTime: slotEnd.toISOString(),
+          durationMinutes: duration,
+          isAvailable: true,
+        });
+      }
+
+      cursor = new Date(cursor.getTime() + stepMs);
     }
 
     return ApiResponse.success(res, {
       doctor: doctorProfile,
-      date: targetDate.toISOString().split('T')[0],
+      date: dateStr,
+      dayOfWeek: localDayOfWeek,
+      timezone: tz,
       onLeave: false,
+      workingHours: {
+        startTime: dayConfig.startTime,
+        endTime: dayConfig.endTime,
+        slotDurationMinutes: duration,
+        bufferMinutes: buffer,
+      },
       slots,
     });
   } catch (error) {
@@ -152,7 +294,7 @@ export const getDoctorSlots = async (req, res, next) => {
 };
 
 /**
- * 3. Update Doctor Schedule and Profile (Doctor only)
+ * 4. Update Doctor Schedule and Profile (Doctor only)
  */
 export const updateDoctorProfile = async (req, res, next) => {
   try {
@@ -168,7 +310,7 @@ export const updateDoctorProfile = async (req, res, next) => {
 };
 
 /**
- * 4. Submit Doctor Leave
+ * 5. Submit Doctor Leave
  */
 export const requestLeave = async (req, res, next) => {
   try {
@@ -180,7 +322,7 @@ export const requestLeave = async (req, res, next) => {
       startDate: new Date(startDate),
       endDate: new Date(endDate),
       reason,
-      status: 'approved', // Auto-approved or pending for admin
+      status: 'approved', // Auto-approved for now
     });
 
     return ApiResponse.created(res, { leave }, 'Leave recorded successfully');
@@ -188,3 +330,6 @@ export const requestLeave = async (req, res, next) => {
     next(error);
   }
 };
+
+// Keep getDoctorSlots as an alias for backward compatibility with existing tests
+export const getDoctorSlots = getAvailability;

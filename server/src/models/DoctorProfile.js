@@ -21,8 +21,14 @@ const workingHourSchema = new mongoose.Schema(
     slotDurationMinutes: {
       type: Number,
       default: 30,
-      min: 10,
-      max: 120,
+      min: 5,
+      max: 180,
+    },
+    bufferMinutes: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 60,
     },
   },
   { _id: false }
@@ -63,14 +69,26 @@ const doctorProfileSchema = new mongoose.Schema(
       required: [true, 'Consultation fee is required'],
       min: 0,
     },
+    slotDurationMinutes: {
+      type: Number,
+      default: 30,
+      min: 5,
+      max: 180,
+    },
+    bufferMinutes: {
+      type: Number,
+      default: 0,
+      min: 0,
+      max: 60,
+    },
     workingHours: {
       type: [workingHourSchema],
       default: [
-        { dayOfWeek: 1, startTime: '09:00', endTime: '17:00', slotDurationMinutes: 30 },
-        { dayOfWeek: 2, startTime: '09:00', endTime: '17:00', slotDurationMinutes: 30 },
-        { dayOfWeek: 3, startTime: '09:00', endTime: '17:00', slotDurationMinutes: 30 },
-        { dayOfWeek: 4, startTime: '09:00', endTime: '17:00', slotDurationMinutes: 30 },
-        { dayOfWeek: 5, startTime: '09:00', endTime: '17:00', slotDurationMinutes: 30 },
+        { dayOfWeek: 1, startTime: '09:00', endTime: '17:00', slotDurationMinutes: 30, bufferMinutes: 0 },
+        { dayOfWeek: 2, startTime: '09:00', endTime: '17:00', slotDurationMinutes: 30, bufferMinutes: 0 },
+        { dayOfWeek: 3, startTime: '09:00', endTime: '17:00', slotDurationMinutes: 30, bufferMinutes: 0 },
+        { dayOfWeek: 4, startTime: '09:00', endTime: '17:00', slotDurationMinutes: 30, bufferMinutes: 0 },
+        { dayOfWeek: 5, startTime: '09:00', endTime: '17:00', slotDurationMinutes: 30, bufferMinutes: 0 },
       ],
     },
     slotHoldsDurationSeconds: {
