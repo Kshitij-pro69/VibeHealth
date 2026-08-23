@@ -167,17 +167,45 @@ export const listAdminDoctors = async (req, res, next) => {
       query.isAcceptingAppointments = false;
     }
 
+    const totalRaw = await DoctorProfile.countDocuments({});
+    const totalMatching = await DoctorProfile.countDocuments(query);
+    logger.info(
+      `[listAdminDoctors] Query: ${JSON.stringify(query)} | Total raw DoctorProfile docs in DB: ${totalRaw} | Matching query docs: ${totalMatching}`
+    );
+
     const profiles = await DoctorProfile.find(query)
       .populate({
         path: 'userId',
         select: 'name email phone avatar isActive createdAt',
-        match: search ? { name: new RegExp(search, 'i') } : {},
+        match: search && search.trim() ? { name: new RegExp(search.trim(), 'i') } : {},
       })
       .sort({ createdAt: -1 })
       .lean();
 
-    // Filter out if user search didn't match
-    const doctors = profiles.filter((p) => p.userId !== null);
+    const doctors = [];
+    for (const profile of profiles) {
+      let userObj = profile.userId;
+      if (!userObj || typeof userObj === 'string' || !userObj.name) {
+        const rawUserId = typeof userObj === 'string' ? userObj : profile.userId;
+        try {
+          if (rawUserId) {
+            const userDoc = await User.findById(rawUserId).select('name email phone avatar isActive createdAt').lean();
+            if (userDoc) userObj = userDoc;
+          }
+        } catch (e) {
+          logger.error(`[listAdminDoctors] User fallback lookup failed for ID ${rawUserId}: ${e.message}`);
+        }
+      }
+
+      if (userObj && typeof userObj === 'object' && userObj.name) {
+        if (search && search.trim()) {
+          const searchRegex = new RegExp(search.trim(), 'i');
+          if (!searchRegex.test(userObj.name)) continue;
+        }
+        profile.userId = userObj;
+        doctors.push(profile);
+      }
+    }
 
     return ApiResponse.success(
       res,

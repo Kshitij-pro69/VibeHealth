@@ -9,6 +9,7 @@ import { NotificationService } from '../services/notificationService.js';
 import { dispatchEmailJob, dispatchCalendarSyncJob } from '../jobs/queue.js';
 import { config } from '../config/env.js';
 import { ApiResponse } from '../utils/apiResponse.js';
+import { logger } from '../utils/logger.js';
 
 export const updateScheduleSchema = z.object({
   specialty: z.string().optional(),
@@ -112,22 +113,69 @@ export const listDoctors = async (req, res, next) => {
   try {
     const { specialty, search } = req.query;
 
-    const query = { isAcceptingAppointments: true };
-    if (specialty) {
-      query.specialty = new RegExp(specialty, 'i');
+    // Filter for active doctors accepting appointments ($ne: false handles boolean true and legacy docs where field is unpopulated)
+    const query = { isAcceptingAppointments: { $ne: false } };
+    if (specialty && specialty.trim()) {
+      query.specialty = new RegExp(specialty.trim(), 'i');
     }
+
+    // Log raw counts & filter query BEFORE filtering for diagnostic visibility
+    const totalRawProfiles = await DoctorProfile.countDocuments({});
+    const totalMatchingQuery = await DoctorProfile.countDocuments(query);
+    logger.info(
+      `[listDoctors] Query filter used: ${JSON.stringify(query)} | Total raw DoctorProfile docs in DB: ${totalRawProfiles} | Matching query docs: ${totalMatchingQuery}`
+    );
 
     const profiles = await DoctorProfile.find(query)
       .populate({
         path: 'userId',
-        select: 'name email phone avatar',
-        match: search ? { name: new RegExp(search, 'i') } : {},
+        select: 'name email phone avatar isActive',
+        match: search && search.trim() ? { name: new RegExp(search.trim(), 'i') } : {},
       })
       .lean();
 
-    // Filter out if user search didn't match
-    const validDoctors = profiles.filter((p) => p.userId !== null);
+    logger.info(`[listDoctors] DoctorProfile.find() returned ${profiles.length} document(s) before populate filtering.`);
 
+    // Populate recovery: Handle cases where userId is an unpopulated ID/string or populate returned null
+    const validDoctors = [];
+    for (const profile of profiles) {
+      let userObj = profile.userId;
+
+      // If populate returned null or an unpopulated string/ObjectId, attempt fallback User lookup
+      if (!userObj || typeof userObj === 'string' || userObj instanceof String || !userObj.name) {
+        const rawUserId = (typeof userObj === 'string' || userObj instanceof String) ? userObj : profile.userId;
+        logger.warn(`[listDoctors] DoctorProfile #${profile._id} has unpopulated/null userId. Executing fallback User.findById lookup for ID: ${rawUserId}`);
+        
+        try {
+          if (rawUserId) {
+            const userDoc = await User.findById(rawUserId).select('name email phone avatar isActive').lean();
+            if (userDoc) {
+              userObj = userDoc;
+            }
+          }
+        } catch (lookupErr) {
+          logger.error(`[listDoctors] Fallback User lookup failed for ID ${rawUserId}: ${lookupErr.message}`);
+        }
+      }
+
+      // Keep doctor profile if linked user is valid
+      if (userObj && typeof userObj === 'object' && userObj.name) {
+        // Enforce search match if search query param was provided
+        if (search && search.trim()) {
+          const searchRegex = new RegExp(search.trim(), 'i');
+          if (!searchRegex.test(userObj.name)) {
+            logger.info(`[listDoctors] Excluding DoctorProfile #${profile._id}: User name "${userObj.name}" does not match search regex "${search.trim()}".`);
+            continue;
+          }
+        }
+        profile.userId = userObj;
+        validDoctors.push(profile);
+      } else {
+        logger.warn(`[listDoctors] Excluding DoctorProfile #${profile._id}: Linked User document could not be resolved (userId field: ${JSON.stringify(profile.userId)}).`);
+      }
+    }
+
+    logger.info(`[listDoctors] Successfully returning ${validDoctors.length} active doctor(s) to client.`);
     return ApiResponse.success(res, { doctors: validDoctors });
   } catch (error) {
     next(error);
@@ -140,12 +188,23 @@ export const listDoctors = async (req, res, next) => {
 export const getDoctorById = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const profile = await DoctorProfile.findOne({ userId: id })
+    let profile = await DoctorProfile.findOne({
+      $or: [{ userId: id }, { _id: id }],
+    })
       .populate('userId', 'name email phone avatar')
       .lean();
 
     if (!profile) {
       return ApiResponse.error(res, 'Doctor not found', 404);
+    }
+
+    // Fallback lookup if populate returned null
+    if (!profile.userId || typeof profile.userId === 'string' || !profile.userId.name) {
+      const targetUserId = (typeof profile.userId === 'string') ? profile.userId : id;
+      const userDoc = await User.findById(targetUserId).select('name email phone avatar').lean();
+      if (userDoc) {
+        profile.userId = userDoc;
+      }
     }
 
     return ApiResponse.success(res, { doctor: profile });
