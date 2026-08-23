@@ -45,57 +45,14 @@ A modern, fault-tolerant healthcare appointment and follow-up management platfor
 ### System Architecture Diagram
 
 ```mermaid
-flowchart TD
-    subgraph ClientLayer ["Frontend Portal (React + Vite + Tailwind)"]
-        PatientPortal["Patient Portal\n(Doctor Search, Slot Hold, Intake Form)"]
-        DoctorPortal["Doctor Portal\n(Schedule, Encounters, Human Review Gate)"]
-        AdminPortal["Admin Portal\n(Doctor Creation, Notification Audit Log)"]
-    end
-
-    subgraph APILayer ["Backend API Gateway (Express Node.js)"]
-        CORS["Global CORS Middleware\n(Trailing-Slash Normalization)"]
-        AuthMiddleware["JWT & RBAC Middleware"]
-        Controllers["Controllers Layer\n(Auth, Doctors, Appointments, Admin)"]
-    end
-
-    subgraph ServiceLayer ["Dedicated Service Layer"]
-        SlotHoldService["SlotHoldService\n(Redis Locks & Expiry)"]
-        NotificationService["NotificationService\n(Doc-First Pending Log)"]
-        GeminiService["Gemini AI Service\n(Pre-Visit & Post-Visit LLM)"]
-        CalendarService["CalendarService\n(OAuth 2.0 & Auto-Refresh)"]
-        EmailService["EmailService\n(HTML Templates)"]
-    end
-
-    subgraph DataStore ["Data & Cache Layer"]
-        MongoDB[("MongoDB Atlas\n(Users, Profiles, Appointments, Notifications)")]
-        Redis[("Redis Store\n(Slot Lock Keys & BullMQ State)")]
-    end
-
-    subgraph QueueWorkers ["BullMQ Background Queue Workers"]
-        EmailWorker["email-queue Worker"]
-        ReminderWorker["reminder-queue Worker (24h Delay)"]
-        CalendarWorker["calendar-sync-queue Worker"]
-        LLMWorker["llm-summary-queue Worker"]
-        SlotHoldWorker["slot-hold-queue Worker"]
-    end
-
-    subgraph ExternalAPIs ["External Third-Party Services"]
-        GoogleGemini["Google Gemini AI API"]
-        GoogleCalendar["Google Calendar API v3"]
-        SMTPServer["SMTP Email Server"]
-    end
-
-    ClientLayer --> CORS --> AuthMiddleware --> Controllers
-    Controllers --> SlotHoldService --> Redis
-    Controllers --> NotificationService --> MongoDB
-    Controllers --> ServiceLayer
-    
-    Controllers -- Enqueue Jobs --> QueueWorkers
-    QueueWorkers --> Redis
-    
-    QueueWorkers -- LLM Jobs --> GeminiService --> GoogleGemini
-    QueueWorkers -- Calendar Jobs --> CalendarService --> GoogleCalendar
-    QueueWorkers -- Email Jobs --> EmailService --> SMTPServer
+graph TD
+    Client["React Frontend SPA"] --> API["Express API Gateway"]
+    API --> MongoDB[("MongoDB Atlas Database")]
+    API --> Redis[("Redis Cache & Lock Store")]
+    API --> Queue["BullMQ Queue Workers"]
+    Queue --> Gemini["Google Gemini AI API"]
+    Queue --> Calendar["Google Calendar API v3"]
+    Queue --> Email["SMTP Email Server"]
 ```
 
 ---
