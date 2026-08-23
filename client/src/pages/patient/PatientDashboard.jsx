@@ -266,7 +266,7 @@ export const PatientDashboard = () => {
                   >
                     <p className="font-semibold text-xs text-slate-900">Dr. {doc.userId?.name}</p>
                     <p className="text-[11px] text-teal-700">{doc.specialty}</p>
-                    <p className="text-[11px] text-slate-500 mt-1">${doc.consultationFee} consultation fee</p>
+                    <p className="text-[11px] text-slate-500 mt-1">₹{doc.consultationFee} consultation fee</p>
                   </div>
                 ))}
               </div>

@@ -176,7 +176,7 @@ export const Register = () => {
                     />
                   </div>
                   <div className="space-y-1">
-                    <label className="text-xs text-slate-600">Consultation Fee ($)</label>
+                    <label className="text-xs text-slate-600">Consultation Fee (₹)</label>
                     <input
                       type="number"
                       name="consultationFee"

@@ -90,6 +90,45 @@ export const Login = () => {
             </Button>
           </form>
 
+          {/* Quick Demo Credentials */}
+          <div className="mt-6 pt-4 border-t border-slate-100 space-y-2">
+            <p className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider text-center">
+              Quick Role Test Fill
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail('patient@vibehealth.dev');
+                  setPassword('Password123!');
+                }}
+                className="p-1.5 bg-slate-50 hover:bg-teal-50 border border-slate-200 hover:border-teal-200 rounded-lg text-xs font-medium text-slate-600 hover:text-teal-700 transition-colors"
+              >
+                Patient
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail('doctor@vibehealth.dev');
+                  setPassword('Password123!');
+                }}
+                className="p-1.5 bg-slate-50 hover:bg-teal-50 border border-slate-200 hover:border-teal-200 rounded-lg text-xs font-medium text-slate-600 hover:text-teal-700 transition-colors"
+              >
+                Doctor
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail('admin@vibehealth.dev');
+                  setPassword('Password123!');
+                }}
+                className="p-1.5 bg-slate-50 hover:bg-teal-50 border border-slate-200 hover:border-teal-200 rounded-lg text-xs font-medium text-slate-600 hover:text-teal-700 transition-colors"
+              >
+                Admin
+              </button>
+            </div>
+          </div>
+
           <div className="mt-6 text-center text-xs text-slate-500">
             Don't have an account?{' '}
             <Link to="/register" className="text-teal-600 font-semibold hover:underline">

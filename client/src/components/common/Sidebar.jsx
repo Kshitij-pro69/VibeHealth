@@ -20,6 +20,7 @@ export const Sidebar = () => {
 
   const patientLinks = [
     { name: 'My Appointments', path: '/patient', icon: Calendar },
+    { name: 'Find a Physician', path: '/patient/doctors', icon: Stethoscope },
     { name: 'Book Appointment', path: '/patient/book', icon: Activity },
     { name: 'Medical Records', path: '/patient/records', icon: FileText },
     { name: 'Notifications', path: '/patient/notifications', icon: Bell },
@@ -34,6 +35,7 @@ export const Sidebar = () => {
 
   const adminLinks = [
     { name: 'System Overview', path: '/admin', icon: Shield },
+    { name: 'Doctors & Schedules', path: '/admin/doctors', icon: Stethoscope },
     { name: 'User Management', path: '/admin/users', icon: Users },
     { name: 'Audit Logs', path: '/admin/logs', icon: Activity },
   ];

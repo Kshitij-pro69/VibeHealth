@@ -3,6 +3,7 @@ import { getRedisClient } from '../config/redis.js';
 import { GeminiService } from '../services/geminiService.js';
 import { CalendarService } from '../services/calendarService.js';
 import { EmailService } from '../services/emailService.js';
+import { SlotHoldService } from '../services/slotHoldService.js';
 import { Appointment } from '../models/Appointment.js';
 import { Notification } from '../models/Notification.js';
 import { DoctorProfile } from '../models/DoctorProfile.js';
@@ -94,7 +95,27 @@ export const startWorkers = () => {
     { connection, concurrency: 5 }
   );
 
-  const workers = [llmWorker, emailWorker, calendarWorker];
+  // 4. Delayed Slot Hold Auto-Release Worker
+  const slotHoldWorker = new Worker(
+    'slot-hold-queue',
+    async (job) => {
+      logger.info(`Processing Slot Hold Release Job: ${job.name} (ID: ${job.id})`);
+      const { appointmentId, doctorId, startTimeISO } = job.data;
+
+      const appointment = await Appointment.findById(appointmentId);
+      if (appointment && appointment.status === 'held') {
+        // Delete held appointment document if it remains unconfirmed at TTL expiry
+        await Appointment.findByIdAndDelete(appointmentId);
+        logger.info(`Deleted expired held appointment document #${appointmentId}`);
+      }
+
+      // Ensure Redis lock key is deleted
+      await SlotHoldService.releaseHold(doctorId, startTimeISO || appointment?.startTime);
+    },
+    { connection, concurrency: 5 }
+  );
+
+  const workers = [llmWorker, emailWorker, calendarWorker, slotHoldWorker];
 
   workers.forEach((worker) => {
     worker.on('failed', (job, err) => {

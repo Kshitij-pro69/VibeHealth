@@ -29,6 +29,7 @@ export const getQueues = () => {
       llmSummaryQueue: new Queue('llm-summary-queue', { connection, defaultJobOptions }),
       calendarSyncQueue: new Queue('calendar-sync-queue', { connection, defaultJobOptions }),
       reminderQueue: new Queue('reminder-queue', { connection, defaultJobOptions }),
+      slotHoldQueue: new Queue('slot-hold-queue', { connection, defaultJobOptions }),
     };
 
     logger.info('BullMQ Queues initialized with exponential backoff retry');
@@ -65,4 +66,40 @@ export const dispatchCalendarSyncJob = async (jobName, data) => {
   } catch (err) {
     logger.error(`Failed to dispatch Calendar job [${jobName}]:`, { error: err.message });
   }
+};
+
+/**
+ * Schedule a delayed BullMQ job to auto-release an unconfirmed slot hold upon TTL expiration.
+ */
+export const dispatchSlotHoldReleaseJob = async (data, delayMs) => {
+  try {
+    const { slotHoldQueue } = getQueues();
+    const jobId = `release_hold_${data.appointmentId}`;
+    logger.info(`Scheduling BullMQ delayed slot hold release job [${jobId}] with delay ${delayMs}ms`);
+    return await slotHoldQueue.add('release-expired-hold', data, {
+      delay: delayMs,
+      jobId,
+    });
+  } catch (err) {
+    logger.error(`Failed to dispatch slot hold release job:`, { error: err.message });
+  }
+};
+
+/**
+ * Cancel/remove a pending BullMQ delayed slot hold release job when confirmed early.
+ */
+export const cancelSlotHoldReleaseJob = async (appointmentId) => {
+  try {
+    const { slotHoldQueue } = getQueues();
+    const jobId = `release_hold_${appointmentId}`;
+    const job = await slotHoldQueue.getJob(jobId);
+    if (job) {
+      await job.remove();
+      logger.info(`Cancelled BullMQ delayed slot hold release job [${jobId}] (Appointment confirmed early)`);
+      return true;
+    }
+  } catch (err) {
+    logger.warn(`Could not cancel delayed slot hold release job for ${appointmentId}:`, { error: err.message });
+  }
+  return false;
 };

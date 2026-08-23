@@ -9,8 +9,11 @@ import { Home } from './pages/Home';
 import { Login } from './pages/auth/Login';
 import { Register } from './pages/auth/Register';
 import { PatientDashboard } from './pages/patient/PatientDashboard';
+import { DoctorSearch } from './pages/patient/DoctorSearch';
+import { DoctorDetail } from './pages/patient/DoctorDetail';
 import { DoctorDashboard } from './pages/doctor/DoctorDashboard';
 import { AdminDashboard } from './pages/admin/AdminDashboard';
+import { DoctorManagement } from './pages/admin/DoctorManagement';
 import { NotFound } from './pages/NotFound';
 
 function App() {
@@ -32,6 +35,8 @@ function App() {
               <Route path="/patient/book" element={<PatientDashboard />} />
               <Route path="/patient/records" element={<PatientDashboard />} />
               <Route path="/patient/notifications" element={<PatientDashboard />} />
+              <Route path="/patient/doctors" element={<DoctorSearch />} />
+              <Route path="/patient/doctors/:doctorId" element={<DoctorDetail />} />
             </Route>
           </Route>
 
@@ -49,6 +54,7 @@ function App() {
           <Route element={<ProtectedRoute allowedRoles={['admin']} />}>
             <Route element={<DashboardLayout />}>
               <Route path="/admin" element={<AdminDashboard />} />
+              <Route path="/admin/doctors" element={<DoctorManagement />} />
               <Route path="/admin/users" element={<AdminDashboard />} />
               <Route path="/admin/logs" element={<AdminDashboard />} />
             </Route>

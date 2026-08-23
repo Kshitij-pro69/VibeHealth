@@ -84,7 +84,7 @@ Additional Patient Notes: ${patientNotes || 'None provided'}`;
       );
 
       const response = await Promise.race([responsePromise, timeoutPromise]);
-      const rawText = response.text();
+      const rawText = response.text;
 
       // Parse JSON
       let parsedJson;
@@ -167,7 +167,7 @@ ${rawDoctorNotes}`;
       );
 
       const response = await Promise.race([responsePromise, timeoutPromise]);
-      const rawText = response.text();
+      const rawText = response.text;
       const parsedJson = JSON.parse(rawText);
       const validatedData = PostVisitSummarySchema.parse(parsedJson);
 

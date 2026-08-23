@@ -8,6 +8,8 @@ import {
   dispatchEmailJob,
   dispatchLLMSummaryJob,
   dispatchCalendarSyncJob,
+  dispatchSlotHoldReleaseJob,
+  cancelSlotHoldReleaseJob,
 } from '../jobs/queue.js';
 import { ApiResponse } from '../utils/apiResponse.js';
 import { logger } from '../utils/logger.js';
@@ -19,9 +21,10 @@ export const holdSlotSchema = z.object({
 });
 
 export const confirmBookingSchema = z.object({
-  doctorId: z.string().min(1, 'Doctor ID is required'),
-  startTime: z.string().datetime('Start time must be a valid ISO-8601 string'),
-  endTime: z.string().datetime('End time must be a valid ISO-8601 string'),
+  appointmentId: z.string().optional(),
+  doctorId: z.string().optional(),
+  startTime: z.string().optional(),
+  endTime: z.string().optional(),
   reasonForVisit: z.string().min(3, 'Reason for visit is required'),
   patientNotes: z.string().optional(),
 });
@@ -44,21 +47,22 @@ export const postVisitSchema = z.object({
 });
 
 /**
- * 1. Hold Slot (Short-lived Redis Lock)
+ * 1. Hold Slot (Atomic Redis SET NX EX Lock + MongoDB 'held' Document + E11000 Catch)
  */
 export const holdSlot = async (req, res, next) => {
   try {
     const { doctorId, startTime, endTime } = req.body;
     const patientId = req.user._id;
+    const slotDate = new Date(startTime);
+    const slotEndDate = new Date(endTime);
 
-    // Check if doctor exists and is accepting appointments
+    // 1. Check if doctor exists and is accepting appointments
     const doctorProfile = await DoctorProfile.findOne({ userId: doctorId, isAcceptingAppointments: true });
     if (!doctorProfile) {
       return ApiResponse.error(res, 'Doctor not found or currently unavailable for booking.', 404);
     }
 
-    // Check doctor leaves
-    const slotDate = new Date(startTime);
+    // 2. Check doctor leaves
     const hasLeave = await Leave.findOne({
       doctorId,
       status: 'approved',
@@ -70,7 +74,23 @@ export const holdSlot = async (req, res, next) => {
       return ApiResponse.error(res, 'The doctor is on approved leave during this time slot.', 409);
     }
 
-    // Check database for existing active appointments (held or confirmed)
+    // 3. Enforce single-hold patient limit across the platform
+    // A patient can hold at most 1 active slot at a time.
+    const activePatientHold = await Appointment.findOne({
+      patientId,
+      status: 'held',
+      slotHoldExpiresAt: { $gt: new Date() },
+    });
+
+    if (activePatientHold) {
+      return ApiResponse.error(
+        res,
+        'You already have an active appointment slot hold. Please confirm or wait for your active hold to expire.',
+        409
+      );
+    }
+
+    // 4. Check for existing active appointments (held or confirmed) for this doctor and slot
     const existingActive = await Appointment.findOne({
       doctorId,
       startTime: slotDate,
@@ -78,33 +98,70 @@ export const holdSlot = async (req, res, next) => {
     });
 
     if (existingActive) {
-      // If held by someone else and not expired
       if (existingActive.status === 'held' && existingActive.slotHoldExpiresAt > new Date()) {
-        return ApiResponse.error(res, 'This slot is temporarily held by another patient.', 409);
+        return ApiResponse.error(res, 'This slot is being booked by someone else.', 409);
       }
       if (existingActive.status === 'confirmed') {
         return ApiResponse.error(res, 'This appointment slot is already booked.', 409);
       }
     }
 
-    // Acquire Redis slot hold
-    const holdDuration = doctorProfile.slotHoldsDurationSeconds || 300;
-    const holdResult = await SlotHoldService.acquireHold(doctorId, startTime, patientId, holdDuration);
+    // 5. Acquire Atomic Redis slot hold (SET hold:{doctorId}:{startTimeISO} {patientId} NX EX {ttl})
+    const ttlSeconds = parseInt(process.env.SLOT_HOLD_TTL_SECONDS || '600', 10);
+    const holdResult = await SlotHoldService.acquireHold(doctorId, startTime, patientId, ttlSeconds);
 
     if (!holdResult.success) {
-      return ApiResponse.error(res, holdResult.error || 'Slot is currently unavailable.', 409);
+      return ApiResponse.error(res, 'This slot is being booked by someone else.', 409);
     }
 
-    return ApiResponse.success(
+    // 6. Create Appointment document immediately with status 'held'
+    // Enforces database-level conflict prevention via partial compound unique index (unique_active_doctor_slot)
+    let appointment;
+    try {
+      appointment = await Appointment.create({
+        patientId,
+        doctorId,
+        startTime: slotDate,
+        endTime: slotEndDate,
+        status: 'held',
+        slotHoldExpiresAt: holdResult.expiresAt,
+        consultationFee: doctorProfile.consultationFee,
+      });
+    } catch (dbErr) {
+      // Catch MongoDB duplicate-key error E11000
+      if (dbErr.code === 11000) {
+        logger.warn('Slot hold collision caught via MongoDB compound unique index E11000:', { doctorId, startTime });
+        // Clean up acquired Redis lock
+        await SlotHoldService.releaseHold(doctorId, startTime);
+        return ApiResponse.error(res, 'This slot is being booked by someone else.', 409);
+      }
+      // If DB creation fails for any other reason, release Redis key
+      await SlotHoldService.releaseHold(doctorId, startTime);
+      throw dbErr;
+    }
+
+    // 7. Schedule BullMQ delayed release job to delete held appointment if unconfirmed at TTL expiry
+    const delayMs = holdResult.expiresAt.getTime() - Date.now();
+    await dispatchSlotHoldReleaseJob(
+      {
+        appointmentId: appointment._id.toString(),
+        doctorId,
+        startTimeISO: new Date(startTime).toISOString(),
+      },
+      delayMs
+    );
+
+    return ApiResponse.created(
       res,
       {
+        appointmentId: appointment._id,
         doctorId,
         startTime,
         endTime,
         holdToken: holdResult.holdToken,
         expiresAt: holdResult.expiresAt,
       },
-      'Slot successfully held for 5 minutes'
+      'Slot successfully held'
     );
   } catch (error) {
     next(error);
@@ -112,91 +169,105 @@ export const holdSlot = async (req, res, next) => {
 };
 
 /**
- * 2. Confirm & Book Appointment
- * Non-blocking: offloads AI pre-visit summary, Google Calendar sync, and Email to BullMQ
+ * 2. Confirm Booking (Supports POST /api/appointments/:id/confirm and POST /api/appointments/confirm)
  */
 export const confirmAppointment = async (req, res, next) => {
   try {
-    const { doctorId, startTime, endTime, reasonForVisit, patientNotes } = req.body;
+    const { doctorId, startTime, endTime, reasonForVisit, patientNotes, appointmentId: bodyApptId } = req.body;
+    const appointmentId = req.params.id || bodyApptId;
     const patientId = req.user._id;
-    const startDateTime = new Date(startTime);
-    const endDateTime = new Date(endTime);
-
-    const doctorUser = await User.findById(doctorId);
-    const doctorProfile = await DoctorProfile.findOne({ userId: doctorId });
-
-    if (!doctorUser || !doctorProfile) {
-      return ApiResponse.error(res, 'Selected doctor profile does not exist.', 404);
-    }
 
     let appointment;
-    try {
-      // Create confirmed appointment in MongoDB
-      // Protected by the compound unique index { doctorId: 1, startTime: 1 } for { status: ['held', 'confirmed'] }
-      appointment = await Appointment.create({
-        patientId,
+    if (appointmentId) {
+      appointment = await Appointment.findById(appointmentId);
+    } else if (doctorId && startTime) {
+      appointment = await Appointment.findOne({
         doctorId,
-        startTime: startDateTime,
-        endTime: endDateTime,
-        status: 'confirmed',
-        reasonForVisit,
-        patientNotes: patientNotes || '',
-        consultationFee: doctorProfile.consultationFee,
-        paymentStatus: 'paid', // Dev default
+        startTime: new Date(startTime),
+        patientId,
+        status: 'held',
       });
-    } catch (dbError) {
-      // Catch MongoDB duplicate key error (E11000)
-      if (dbError.code === 11000) {
-        logger.warn('Slot collision caught via compound unique index E11000:', { doctorId, startTime });
-        return ApiResponse.error(
-          res,
-          'This appointment time slot is already confirmed or reserved. Please select another slot.',
-          409
-        );
-      }
-      throw dbError;
     }
 
-    // Release temporary Redis slot hold
-    await SlotHoldService.releaseHold(doctorId, startTime);
+    if (!appointment) {
+      return ApiResponse.error(res, 'Held slot expired or appointment not found.', 404);
+    }
+
+    // Verify ownership
+    if (appointment.patientId.toString() !== patientId.toString()) {
+      return ApiResponse.error(res, 'Unauthorized to confirm this appointment hold.', 403);
+    }
+
+    // Verify status
+    if (appointment.status === 'confirmed') {
+      return ApiResponse.success(res, { appointment }, 'Appointment is already confirmed.');
+    }
+
+    if (appointment.status !== 'held') {
+      return ApiResponse.error(res, 'Appointment hold is no longer valid.', 409);
+    }
+
+    // Verify expiration
+    if (appointment.slotHoldExpiresAt && new Date(appointment.slotHoldExpiresAt) < new Date()) {
+      await Appointment.findByIdAndDelete(appointment._id);
+      await SlotHoldService.releaseHold(appointment.doctorId, appointment.startTime);
+      return ApiResponse.error(res, 'Hold period has expired. Please select a slot again.', 409);
+    }
+
+    const doctorUser = await User.findById(appointment.doctorId);
+    const doctorProfile = await DoctorProfile.findOne({ userId: appointment.doctorId });
+
+    // Flip status to 'confirmed' and clear hold expiry
+    appointment.status = 'confirmed';
+    appointment.reasonForVisit = reasonForVisit;
+    appointment.patientNotes = patientNotes || '';
+    appointment.slotHoldExpiresAt = null;
+    appointment.paymentStatus = 'paid';
+    await appointment.save();
+
+    // Cancel pending BullMQ delayed release job
+    await cancelSlotHoldReleaseJob(appointment._id.toString());
+
+    // Release Redis lock key
+    await SlotHoldService.releaseHold(appointment.doctorId, appointment.startTime);
 
     // Asynchronously dispatch BullMQ background jobs (NON-BLOCKING)
     // 1. AI Pre-visit Triage Summary
     dispatchLLMSummaryJob('generate-previsit-triage', {
       appointmentId: appointment._id,
-      doctorId,
+      doctorId: appointment.doctorId,
       reasonForVisit,
       patientNotes: patientNotes || '',
     });
 
-    // 2. Google Calendar Synchronization
+    // 2. Google Calendar Sync Stub
     dispatchCalendarSyncJob('sync-calendar-event', {
       action: 'create_event',
       appointmentId: appointment._id,
-      doctorId,
+      doctorId: appointment.doctorId,
       eventDetails: {
-        title: `VibeHealth Consultation: ${req.user.name} & Dr. ${doctorUser.name}`,
+        title: `VibeHealth Consultation: ${req.user.name} & Dr. ${doctorUser?.name || ''}`,
         description: `Reason for visit: ${reasonForVisit}`,
-        startTime,
-        endTime,
+        startTime: appointment.startTime,
+        endTime: appointment.endTime,
         patientEmail: req.user.email,
-        doctorEmail: doctorUser.email,
+        doctorEmail: doctorUser?.email || '',
       },
     });
 
-    // 3. Confirmation Email
+    // 3. Confirmation Email Stub
     dispatchEmailJob('send-booking-confirmation', {
       type: 'booking_confirmation',
       payload: {
         to: req.user.email,
         patientName: req.user.name,
-        doctorName: doctorUser.name,
-        startTime,
+        doctorName: doctorUser?.name || 'Doctor',
+        startTime: appointment.startTime,
         appointmentId: appointment._id,
       },
     });
 
-    return ApiResponse.created(
+    return ApiResponse.success(
       res,
       {
         appointment,

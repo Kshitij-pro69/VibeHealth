@@ -1,41 +1,44 @@
 import { getRedisClient } from '../config/redis.js';
 import { logger } from '../utils/logger.js';
 
-const HOLD_KEY_PREFIX = 'slot:hold:';
-const DEFAULT_HOLD_TTL_SECONDS = 300; // 5 minutes
+const HOLD_KEY_PREFIX = 'hold:';
+const DEFAULT_HOLD_TTL_SECONDS = parseInt(process.env.SLOT_HOLD_TTL_SECONDS || '600', 10);
 
 export class SlotHoldService {
-  static _buildKey(doctorId, startTimeISO) {
+  static _buildKey(doctorId, startTime) {
+    const startTimeISO = new Date(startTime).toISOString();
     return `${HOLD_KEY_PREFIX}${doctorId}:${startTimeISO}`;
   }
 
   /**
-   * Attempts to acquire a short-lived hold on an appointment slot in Redis.
+   * Attempts to acquire an atomic lock on an appointment slot in Redis.
+   * Command: SET hold:{doctorId}:{startTimeISO} {patientId} NX EX {ttlSeconds}
+   *
    * @param {string} doctorId - Doctor User ID
    * @param {string|Date} startTime - Slot start time
    * @param {string} patientId - Patient User ID
-   * @param {number} ttlSeconds - Duration of the hold in seconds
+   * @param {number} ttlSeconds - Duration of the hold in seconds (default 600s)
    * @returns {Promise<{ success: boolean, holdToken?: string, expiresAt?: Date, error?: string }>}
    */
-  static async acquireHold(doctorId, startTime, patientId, ttlSeconds = DEFAULT_HOLD_TTL_SECONDS) {
+  static async acquireHold(
+    doctorId,
+    startTime,
+    patientId,
+    ttlSeconds = DEFAULT_HOLD_TTL_SECONDS
+  ) {
     try {
       const redis = getRedisClient();
-      const startTimeISO = new Date(startTime).toISOString();
-      const key = this._buildKey(doctorId, startTimeISO);
-      const holdToken = `hold_${patientId}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-      const payload = JSON.stringify({
-        patientId,
-        holdToken,
-        createdAt: new Date().toISOString(),
-      });
+      const key = this._buildKey(doctorId, startTime);
+      const patientIdStr = patientId.toString();
 
-      // 'NX' ensures key is set only if it does not already exist
+      // 'NX' ensures key is set ONLY if it does not already exist (Atomic SET-if-Not-Exists)
       // 'EX' sets expiration in seconds
-      const result = await redis.set(key, payload, 'EX', ttlSeconds, 'NX');
+      const result = await redis.set(key, patientIdStr, 'EX', ttlSeconds, 'NX');
 
       if (result === 'OK') {
         const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
-        logger.info(`Acquired Redis slot hold: ${key} for patient ${patientId} (TTL ${ttlSeconds}s)`);
+        const holdToken = `hold_${patientIdStr}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+        logger.info(`Acquired Redis slot lock: ${key} for patient ${patientIdStr} (TTL ${ttlSeconds}s)`);
         return {
           success: true,
           holdToken,
@@ -43,10 +46,10 @@ export class SlotHoldService {
         };
       }
 
-      // Slot is currently held by another patient
+      // Lock acquisition failed (already held by another patient)
       return {
         success: false,
-        error: 'This slot is currently held by another user. Please try again shortly.',
+        error: 'This slot is being booked by someone else.',
       };
     } catch (err) {
       logger.error('Error in SlotHoldService.acquireHold:', { error: err.message, doctorId, startTime });
@@ -58,26 +61,23 @@ export class SlotHoldService {
   }
 
   /**
-   * Verifies if a slot is held by the specified patient or holds a valid token.
+   * Verifies if a slot hold in Redis exists and belongs to the specified patient.
    */
   static async verifyHold(doctorId, startTime, patientId) {
     try {
       const redis = getRedisClient();
-      const startTimeISO = new Date(startTime).toISOString();
-      const key = this._buildKey(doctorId, startTimeISO);
-      const data = await redis.get(key);
+      const key = this._buildKey(doctorId, startTime);
+      const storedPatientId = await redis.get(key);
 
-      if (!data) {
+      if (!storedPatientId) {
         return { held: false, isOwner: false };
       }
 
-      const parsed = JSON.parse(data);
-      const isOwner = parsed.patientId === patientId.toString();
-
+      const isOwner = storedPatientId === patientId.toString();
       return {
         held: true,
         isOwner,
-        holdToken: parsed.holdToken,
+        storedPatientId,
       };
     } catch (err) {
       logger.error('Error in SlotHoldService.verifyHold:', { error: err.message });
@@ -91,10 +91,9 @@ export class SlotHoldService {
   static async releaseHold(doctorId, startTime) {
     try {
       const redis = getRedisClient();
-      const startTimeISO = new Date(startTime).toISOString();
-      const key = this._buildKey(doctorId, startTimeISO);
+      const key = this._buildKey(doctorId, startTime);
       await redis.del(key);
-      logger.info(`Released Redis slot hold: ${key}`);
+      logger.info(`Released Redis slot lock: ${key}`);
       return { success: true };
     } catch (err) {
       logger.error('Error in SlotHoldService.releaseHold:', { error: err.message });

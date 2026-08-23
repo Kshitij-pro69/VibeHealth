@@ -23,8 +23,9 @@ router.use(authenticate);
 // 1. Slot Hold
 router.post('/hold', validateRequest(holdSlotSchema), holdSlot);
 
-// 2. Confirm Booking
+// 2. Confirm Booking (Supports both /confirm and /:id/confirm)
 router.post('/confirm', validateRequest(confirmBookingSchema), confirmAppointment);
+router.post('/:id/confirm', validateRequest(confirmBookingSchema), confirmAppointment);
 
 // 3. User Appointments list
 router.get('/my', getMyAppointments);
