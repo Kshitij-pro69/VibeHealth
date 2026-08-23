@@ -357,13 +357,35 @@ export const getAllUsers = async (req, res, next) => {
  */
 export const getAdminStats = async (req, res, next) => {
   try {
-    const [totalUsers, totalPatients, totalDoctors, totalAppointments, confirmedAppointments] = await Promise.all([
+    const [
+      totalUsers,
+      totalPatients,
+      totalDoctors,
+      totalAppointments,
+      confirmedAppointments,
+      completedAppointments,
+      cancelledAppointments,
+      apptsByDoctorRaw,
+    ] = await Promise.all([
       User.countDocuments(),
       User.countDocuments({ role: 'patient' }),
       User.countDocuments({ role: 'doctor' }),
       Appointment.countDocuments(),
       Appointment.countDocuments({ status: 'confirmed' }),
+      Appointment.countDocuments({ status: 'completed' }),
+      Appointment.countDocuments({ status: 'cancelled' }),
+      Appointment.aggregate([
+        { $group: { _id: '$doctorId', count: { $sum: 1 } } },
+        { $lookup: { from: 'users', localField: '_id', foreignField: '_id', as: 'doctor' } },
+        { $unwind: { path: '$doctor', preserveNullAndEmptyArrays: true } },
+        { $project: { _id: 1, count: 1, doctorName: '$doctor.name', doctorEmail: '$doctor.email' } },
+      ]),
     ]);
+
+    const cancellationRatePercent =
+      totalAppointments > 0
+        ? parseFloat(((cancelledAppointments / totalAppointments) * 100).toFixed(1))
+        : 0;
 
     return ApiResponse.success(
       res,
@@ -374,6 +396,10 @@ export const getAdminStats = async (req, res, next) => {
           totalDoctors,
           totalAppointments,
           confirmedAppointments,
+          completedAppointments,
+          cancelledAppointments,
+          cancellationRatePercent,
+          appointmentsPerDoctor: apptsByDoctorRaw || [],
         },
       },
       'Admin statistics retrieved successfully'

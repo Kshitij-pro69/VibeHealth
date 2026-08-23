@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import api from '../../api/axios';
 import { Card } from '../../components/common/Card';
 import { Button } from '../../components/common/Button';
 import { Badge } from '../../components/common/Badge';
 import { Spinner } from '../../components/common/Spinner';
+import { UrgencyBadge } from '../../components/common/UrgencyBadge';
 import {
   Calendar,
   Sparkles,
@@ -27,6 +29,7 @@ const urgencyVariant = (urgency) => {
 
 export const DoctorDashboard = () => {
   const { user } = useAuth();
+  const { addToast } = useToast();
   const [appointments, setAppointments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeAppointment, setActiveAppointment] = useState(null);
@@ -307,9 +310,7 @@ export const DoctorDashboard = () => {
                           <Sparkles className="w-4 h-4 text-teal-600" />
                           <span>Clinician-Reference Triage Assistance</span>
                         </div>
-                        <Badge variant={urgencyVariant(apt.preVisitSummary.urgency)}>
-                          {apt.preVisitSummary.urgency?.toUpperCase()} URGENCY
-                        </Badge>
+                        <UrgencyBadge urgency={apt.preVisitSummary.urgency} />
                       </div>
 
                       {/* Chief Complaint */}
