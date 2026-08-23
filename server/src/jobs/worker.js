@@ -293,30 +293,64 @@ export const startWorkers = () => {
   const emailWorker = new Worker('email-queue', processNotificationJob, { connection, concurrency: 10 });
   const reminderWorker = new Worker('reminder-queue', processNotificationJob, { connection, concurrency: 10 });
 
-  // 3. Google Calendar Sync Worker
+  // 3. Google Calendar Sync Worker (Resilient & Non-Blocking)
   const calendarWorker = new Worker(
     'calendar-sync-queue',
     async (job) => {
       logger.info(`Processing Calendar Job: ${job.name} (ID: ${job.id})`);
-      const { action, appointmentId, doctorId, eventDetails } = job.data;
+      const { action, appointmentId, doctorId, patientId: jobPatientId, eventDetails = {} } = job.data;
 
-      const profile = await DoctorProfile.findOne({ userId: doctorId }).select('+googleOAuthTokens');
-      const tokens = profile?.googleOAuthTokens;
+      const appointment = await Appointment.findById(appointmentId);
+      if (!appointment && action !== 'create_event') return;
 
-      if (!tokens || !tokens.accessToken) {
-        logger.info(`Doctor ${doctorId} has no active Google Calendar integration.`);
-        return;
-      }
+      const targetPatientId = jobPatientId || appointment?.patientId?.toString();
+      const targetDoctorId = doctorId || appointment?.doctorId?.toString();
 
-      if (action === 'create_event') {
-        const res = await CalendarService.createEvent(tokens, eventDetails);
-        if (res.success && res.eventId) {
-          await Appointment.findByIdAndUpdate(appointmentId, {
-            calendarEventId: res.eventId,
-          });
+      if (action === 'create_event' || action === 'sync-calendar-event') {
+        const updateFields = {};
+
+        // 1. Create Patient Calendar Event (if patient has connected calendar)
+        if (targetPatientId) {
+          const resP = await CalendarService.createEvent(targetPatientId, eventDetails);
+          if (resP.success && resP.eventId) {
+            updateFields.patientCalendarEventId = resP.eventId;
+          }
         }
-      } else if (action === 'delete_event' && eventDetails?.eventId) {
-        await CalendarService.deleteEvent(tokens, eventDetails.eventId);
+
+        // 2. Create Doctor Calendar Event (if doctor has connected calendar)
+        if (targetDoctorId) {
+          const resD = await CalendarService.createEvent(targetDoctorId, eventDetails);
+          if (resD.success && resD.eventId) {
+            updateFields.doctorCalendarEventId = resD.eventId;
+            updateFields.calendarEventId = resD.eventId;
+          }
+        }
+
+        if (Object.keys(updateFields).length > 0 && appointmentId) {
+          await Appointment.findByIdAndUpdate(appointmentId, updateFields);
+        }
+      } else if (action === 'update_event' || action === 'update-calendar-event') {
+        // Reschedule: update existing events on both calendars
+        const pEventId = appointment?.patientCalendarEventId;
+        const dEventId = appointment?.doctorCalendarEventId || appointment?.calendarEventId;
+
+        if (targetPatientId && pEventId) {
+          await CalendarService.updateEvent(targetPatientId, pEventId, eventDetails);
+        }
+        if (targetDoctorId && dEventId) {
+          await CalendarService.updateEvent(targetDoctorId, dEventId, eventDetails);
+        }
+      } else if (action === 'delete_event' || action === 'cancel-calendar-event') {
+        // Cancellation: delete events from both calendars
+        const pEventId = appointment?.patientCalendarEventId || eventDetails?.patientEventId;
+        const dEventId = appointment?.doctorCalendarEventId || appointment?.calendarEventId || eventDetails?.eventId;
+
+        if (targetPatientId && pEventId) {
+          await CalendarService.deleteEvent(targetPatientId, pEventId);
+        }
+        if (targetDoctorId && dEventId) {
+          await CalendarService.deleteEvent(targetDoctorId, dEventId);
+        }
       }
     },
     { connection, concurrency: 5 }

@@ -16,6 +16,7 @@ import { DoctorLeaves } from './pages/doctor/DoctorLeaves';
 import { AdminDashboard } from './pages/admin/AdminDashboard';
 import { DoctorManagement } from './pages/admin/DoctorManagement';
 import { AdminNotifications } from './pages/admin/AdminNotifications';
+import { Settings } from './pages/Settings';
 import { NotFound } from './pages/NotFound';
 
 function App() {
@@ -60,6 +61,13 @@ function App() {
               <Route path="/admin/notifications" element={<AdminNotifications />} />
               <Route path="/admin/users" element={<AdminDashboard />} />
               <Route path="/admin/logs" element={<AdminDashboard />} />
+            </Route>
+          </Route>
+
+          {/* Common Settings Route for Authenticated Users */}
+          <Route element={<ProtectedRoute allowedRoles={['patient', 'doctor', 'admin']} />}>
+            <Route element={<DashboardLayout />}>
+              <Route path="/settings" element={<Settings />} />
             </Route>
           </Route>
 

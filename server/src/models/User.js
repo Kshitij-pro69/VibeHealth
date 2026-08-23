@@ -47,6 +47,19 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    calendarStatus: {
+      type: String,
+      enum: ['not_connected', 'connected', 'reauth_required'],
+      default: 'not_connected',
+      index: true,
+    },
+    googleTokens: {
+      access_token: { type: String, select: false },
+      refresh_token: { type: String, select: false },
+      expiry_date: { type: Number, select: false },
+      scope: { type: String },
+      token_type: { type: String },
+    },
   },
   {
     timestamps: true,

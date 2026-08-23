@@ -24,13 +24,14 @@ export const Sidebar = () => {
     { name: 'Book Appointment', path: '/patient/book', icon: Activity },
     { name: 'Medical Records', path: '/patient/records', icon: FileText },
     { name: 'Notifications', path: '/patient/notifications', icon: Bell },
+    { name: 'Calendar & Settings', path: '/settings', icon: Settings },
   ];
 
   const doctorLinks = [
     { name: 'Consultations', path: '/doctor', icon: Stethoscope },
     { name: 'Schedule & Slots', path: '/doctor/schedule', icon: Clock },
     { name: 'Leaves & Time Off', path: '/doctor/leaves', icon: Calendar },
-    { name: 'Profile Settings', path: '/doctor/profile', icon: Settings },
+    { name: 'Calendar & Settings', path: '/settings', icon: Settings },
   ];
 
   const adminLinks = [
@@ -38,7 +39,7 @@ export const Sidebar = () => {
     { name: 'Doctors & Schedules', path: '/admin/doctors', icon: Stethoscope },
     { name: 'Notifications Log', path: '/admin/notifications', icon: Bell },
     { name: 'User Management', path: '/admin/users', icon: Users },
-    { name: 'Audit Logs', path: '/admin/logs', icon: Activity },
+    { name: 'Calendar & Settings', path: '/settings', icon: Settings },
   ];
 
   let links = patientLinks;

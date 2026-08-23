@@ -199,6 +199,14 @@ const appointmentSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    patientCalendarEventId: {
+      type: String,
+      default: null,
+    },
+    doctorCalendarEventId: {
+      type: String,
+      default: null,
+    },
     reminderJobId: {
       type: String,
       default: null,
