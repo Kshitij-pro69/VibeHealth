@@ -1,0 +1,31 @@
+{
+  "name": "vibehealth-server",
+  "version": "1.0.0",
+  "description": "VibeHealth Backend API & In-Process Background Workers",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js"
+  },
+  "dependencies": {
+    "@google/genai": "^2.0.0",
+    "bcrypt": "^5.1.1",
+    "bullmq": "^5.41.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "googleapis": "^144.0.0",
+    "ioredis": "^5.5.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.10.1",
+    "nodemailer": "^6.10.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
