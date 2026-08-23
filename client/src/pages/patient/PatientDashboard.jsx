@@ -19,8 +19,10 @@ export const PatientDashboard = () => {
   const [doctors, setDoctors] = useState([]);
   const [selectedDoctor, setSelectedDoctor] = useState(null);
   const [availableSlots, setAvailableSlots] = useState([]);
+  const [slotsLoading, setSlotsLoading] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState(null);
   const [holdToken, setHoldToken] = useState(null);
+  const [heldAppointmentId, setHeldAppointmentId] = useState(null);
   const [holdExpiresAt, setHoldExpiresAt] = useState(null);
   const [reasonForVisit, setReasonForVisit] = useState('');
   const [patientNotes, setPatientNotes] = useState('');
@@ -61,31 +63,46 @@ export const PatientDashboard = () => {
     setSelectedDoctor(doc);
     setSelectedSlot(null);
     setHoldToken(null);
+    setHeldAppointmentId(null);
     setBookingError('');
+    setSlotsLoading(true);
+
+    const targetDocId = doc.userId?._id || doc.userId || doc._id;
+    const CLINIC_TZ = 'Asia/Kolkata';
+    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: CLINIC_TZ }); // YYYY-MM-DD in IST
 
     try {
-      const today = new Date().toISOString().split('T')[0];
-      const res = await api.get(`/doctors/${doc.userId._id}/slots?date=${today}`);
-      if (res.success) {
+      const res = await api.get(
+        `/doctors/${targetDocId}/availability?date=${todayStr}&tz=${encodeURIComponent(CLINIC_TZ)}`
+      );
+      if (res.success && res.data?.slots) {
         setAvailableSlots(res.data.slots);
+      } else {
+        setAvailableSlots([]);
       }
     } catch (err) {
-      setBookingError('Could not fetch doctor schedule');
+      console.error('Could not fetch doctor schedule:', err);
+      setBookingError('Could not fetch doctor schedule. You can view full schedule on doctor details page.');
+      setAvailableSlots([]);
+    } finally {
+      setSlotsLoading(false);
     }
   };
 
   const handleHoldSlot = async (slot) => {
     setBookingError('');
+    const targetDocId = selectedDoctor?.userId?._id || selectedDoctor?.userId || selectedDoctor?._id;
     try {
       const res = await api.post('/appointments/hold', {
-        doctorId: selectedDoctor.userId._id,
+        doctorId: targetDocId,
         startTime: slot.startTime,
         endTime: slot.endTime,
       });
 
       if (res.success) {
         setSelectedSlot(slot);
-        setHoldToken(res.data.holdToken);
+        setHoldToken(res.data.holdToken || res.data.appointment?._id);
+        setHeldAppointmentId(res.data.appointment?._id);
         setHoldExpiresAt(res.data.expiresAt);
       }
     } catch (err) {
@@ -100,19 +117,26 @@ export const PatientDashboard = () => {
     setBookingLoading(true);
     setBookingError('');
 
+    const targetDocId = selectedDoctor?.userId?._id || selectedDoctor?.userId || selectedDoctor?._id;
+
     try {
       const res = await api.post('/appointments/confirm', {
-        doctorId: selectedDoctor.userId._id,
+        appointmentId: heldAppointmentId,
+        doctorId: targetDocId,
         startTime: selectedSlot.startTime,
         endTime: selectedSlot.endTime,
         reasonForVisit,
         patientNotes,
+        symptoms: reasonForVisit ? [reasonForVisit] : [],
+        duration: '1-3 days',
+        severity: 5,
       });
 
       if (res.success) {
         setShowBookingModal(false);
         setSelectedSlot(null);
         setHoldToken(null);
+        setHeldAppointmentId(null);
         setReasonForVisit('');
         setPatientNotes('');
         fetchAppointments();
@@ -388,34 +412,73 @@ export const PatientDashboard = () => {
 
             {/* Step 2: Select Slot & Hold */}
             {selectedDoctor && (
-              <div className="space-y-2">
+              <div className="space-y-3 bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
                 <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-slate-700">2. Select Today's Open Slot</label>
+                  <div>
+                    <p className="text-xs font-bold text-slate-900">Dr. {selectedDoctor.userId?.name}</p>
+                    <p className="text-[11px] text-teal-700">{selectedDoctor.specialty} • ₹{selectedDoctor.consultationFee}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const targetId = selectedDoctor.userId?._id || selectedDoctor.userId || selectedDoctor._id;
+                      navigate(`/patient/doctors/${targetId}`);
+                    }}
+                    className="px-2.5 py-1 text-[11px] font-semibold text-teal-700 hover:text-teal-800 underline"
+                  >
+                    View Full Schedule →
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between pt-1 border-t border-slate-200/60">
+                  <label className="text-xs font-semibold text-slate-700">Select Today's Available Slot</label>
                   {holdExpiresAt && (
                     <Badge variant="warning" className="text-[10px]">
                       Slot locked for 5m
                     </Badge>
                   )}
                 </div>
-                <div className="grid grid-cols-3 gap-2 max-h-36 overflow-y-auto p-1">
-                  {availableSlots.map((slot, i) => (
+
+                {slotsLoading ? (
+                  <div className="py-6 text-center">
+                    <Spinner size="sm" />
+                    <p className="text-xs text-slate-400 mt-1">Computing available slots...</p>
+                  </div>
+                ) : availableSlots.length === 0 ? (
+                  <div className="p-3 bg-white border border-slate-200 rounded-xl text-center space-y-2">
+                    <p className="text-xs text-slate-600">No open slots available for today.</p>
                     <button
-                      key={i}
                       type="button"
-                      disabled={!slot.isAvailable}
-                      onClick={() => handleHoldSlot(slot)}
-                      className={`p-2 rounded-lg text-xs font-medium border transition-all ${
-                        selectedSlot?.startTime === slot.startTime
-                          ? 'bg-teal-600 text-white border-teal-600'
-                          : slot.isAvailable
-                          ? 'border-slate-200 bg-white hover:border-teal-500 text-slate-700'
-                          : 'border-slate-100 bg-slate-100 text-slate-400 cursor-not-allowed'
-                      }`}
+                      onClick={() => {
+                        const targetId = selectedDoctor.userId?._id || selectedDoctor.userId || selectedDoctor._id;
+                        navigate(`/patient/doctors/${targetId}`);
+                      }}
+                      className="px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white rounded-lg font-semibold text-xs transition"
                     >
-                      {new Date(slot.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      Book Future Date on Doctor Page
                     </button>
-                  ))}
-                </div>
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-3 gap-2 max-h-36 overflow-y-auto p-1">
+                    {availableSlots.map((slot, i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        disabled={!slot.isAvailable}
+                        onClick={() => handleHoldSlot(slot)}
+                        className={`p-2 rounded-lg text-xs font-medium border transition-all ${
+                          selectedSlot?.startTime === slot.startTime
+                            ? 'bg-teal-600 text-white border-teal-600 shadow-sm'
+                            : slot.isAvailable
+                            ? 'border-slate-200 bg-white hover:border-teal-500 text-slate-700'
+                            : 'border-slate-100 bg-slate-100 text-slate-400 cursor-not-allowed'
+                        }`}
+                      >
+                        {new Date(slot.startTime).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 

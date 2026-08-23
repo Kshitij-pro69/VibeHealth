@@ -35,7 +35,7 @@ function App() {
           <Route element={<ProtectedRoute allowedRoles={['patient']} />}>
             <Route element={<DashboardLayout />}>
               <Route path="/patient" element={<PatientDashboard />} />
-              <Route path="/patient/book" element={<PatientDashboard />} />
+              <Route path="/patient/book" element={<DoctorSearch />} />
               <Route path="/patient/records" element={<PatientDashboard />} />
               <Route path="/patient/notifications" element={<PatientDashboard />} />
               <Route path="/patient/doctors" element={<DoctorSearch />} />
