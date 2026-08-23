@@ -199,6 +199,10 @@ const appointmentSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    reminderJobId: {
+      type: String,
+      default: null,
+    },
     slotHoldExpiresAt: {
       type: Date,
       default: null,

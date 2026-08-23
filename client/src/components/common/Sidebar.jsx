@@ -36,6 +36,7 @@ export const Sidebar = () => {
   const adminLinks = [
     { name: 'System Overview', path: '/admin', icon: Shield },
     { name: 'Doctors & Schedules', path: '/admin/doctors', icon: Stethoscope },
+    { name: 'Notifications Log', path: '/admin/notifications', icon: Bell },
     { name: 'User Management', path: '/admin/users', icon: Users },
     { name: 'Audit Logs', path: '/admin/logs', icon: Activity },
   ];

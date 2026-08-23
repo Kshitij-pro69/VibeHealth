@@ -11,6 +11,10 @@ import {
   createDoctorSchema,
   updateDoctorSchema,
 } from '../controllers/adminController.js';
+import {
+  getNotificationLogs,
+  retryFailedNotification,
+} from '../controllers/adminNotificationController.js';
 import { requireAuth } from '../middleware/auth.js';
 import { requireRole } from '../middleware/rbac.js';
 import { validateRequest } from '../middleware/validate.js';
@@ -33,5 +37,11 @@ router.get('/doctors/:id', getAdminDoctorById);
 router.put('/doctors/:id', validateRequest(updateDoctorSchema), updateDoctor);
 router.put('/doctors/:id/toggle-status', toggleDoctorStatus);
 
+// Notification System Audit Log & Delivery Control
+router.get('/notifications', getNotificationLogs);
+router.post('/notifications/:id/retry', retryFailedNotification);
+
 export default router;
+
+
 

@@ -167,50 +167,131 @@ export const startWorkers = () => {
   });
 
 
-  // 2. Email Notification Worker
-  const emailWorker = new Worker(
-    'email-queue',
-    async (job) => {
-      logger.info(`Processing Email Job: ${job.name} (ID: ${job.id})`);
-      if (job.name === 'send-post-visit-summary') {
-        const { appointmentId, patientId, doctorId } = job.data;
-        const appointment = await Appointment.findById(appointmentId)
+  // 2. Email & Reminder Notification Workers
+  const processNotificationJob = async (job) => {
+    logger.info(`Processing Email Notification Job: ${job.name} (ID: ${job.id})`);
+    const { notificationId, recipientEmail, emailType, payload = {}, title, message, type } = job.data;
+
+    let notification = null;
+    if (notificationId) {
+      notification = await Notification.findById(notificationId);
+    } else if (job.id) {
+      notification = await Notification.findOne({ jobId: job.id.toString() });
+    }
+
+    if (notification) {
+      notification.attempts = (notification.attempts || 0) + 1;
+      await notification.save();
+    }
+
+    let emailResult = { success: false, error: 'Unknown email template type' };
+
+    const effectiveType = emailType || type;
+    const targetEmail = recipientEmail || payload.to || payload.recipientEmail;
+
+    if (effectiveType === 'booking_confirmation') {
+      emailResult = await EmailService.sendBookingConfirmation({
+        to: targetEmail,
+        patientName: payload.patientName,
+        doctorName: payload.doctorName,
+        startTime: payload.startTime,
+        appointmentId: payload.appointmentId,
+        isDoctorCopy: payload.isDoctorCopy,
+      });
+    } else if (effectiveType === 'appointment_reminder') {
+      emailResult = await EmailService.send24hReminder({
+        to: targetEmail,
+        patientName: payload.patientName,
+        doctorName: payload.doctorName,
+        startTime: payload.startTime,
+        appointmentId: payload.appointmentId,
+      });
+    } else if (effectiveType === 'cancellation') {
+      emailResult = await EmailService.sendCancellationNotice({
+        to: targetEmail,
+        recipientName: payload.recipientName,
+        otherPartyName: payload.otherPartyName,
+        startTime: payload.startTime,
+        cancelledBy: payload.cancelledBy,
+      });
+    } else if (effectiveType === 'doctor_leave_cancellation') {
+      emailResult = await EmailService.sendBookingCancellation({
+        to: targetEmail,
+        patientName: payload.patientName,
+        doctorName: payload.doctorName,
+        startTime: payload.startTime,
+        cancellationReason: payload.cancellationReason || 'doctor_unavailable',
+        rebookUrl: payload.rebookUrl,
+      });
+    } else if (effectiveType === 'rebooking_prompt') {
+      emailResult = await EmailService.sendRebookingPrompt({
+        to: targetEmail,
+        patientName: payload.patientName,
+        doctorName: payload.doctorName,
+        rebookUrl: payload.rebookUrl,
+      });
+    } else if (effectiveType === 'post_visit_summary' || job.name === 'send-post-visit-summary') {
+      let approvedSummary = payload.approvedSummary;
+      let patientName = payload.patientName;
+      let doctorName = payload.doctorName;
+
+      if (!approvedSummary && payload.appointmentId) {
+        const apt = await Appointment.findById(payload.appointmentId)
           .populate('patientId', 'name email')
           .populate('doctorId', 'name');
-
-        if (appointment && appointment.patientId?.email) {
-          const approvedSummary = appointment.postVisitSummary?.patientSummary?.approvedText || appointment.postVisitSummary?.clinicalNotes;
-          await EmailService.sendEmail({
-            to: appointment.patientId.email,
-            subject: `Your Post-Visit Summary from Dr. ${appointment.doctorId?.name || 'Your Doctor'}`,
-            text: `Hello ${appointment.patientId.name},\n\nDr. ${appointment.doctorId?.name} has approved your post-visit summary:\n\n${approvedSummary}\n\nYou can also log into your VibeHealth portal to view full details.\n\nBest regards,\nVibeHealth Team`,
-            html: `<div style="font-family: sans-serif; line-height: 1.5;">
-              <h2>Your Post-Visit Summary</h2>
-              <p>Hello <strong>${appointment.patientId.name}</strong>,</p>
-              <p>Dr. ${appointment.doctorId?.name} has finalized your consultation summary:</p>
-              <div style="background-color: #f8fafc; border-left: 4px solid #0d9488; padding: 12px 16px; margin: 16px 0;">
-                <p style="white-space: pre-wrap; margin: 0;">${approvedSummary}</p>
-              </div>
-              <p>Log in to your <a href="http://localhost:5173/patient/dashboard">VibeHealth Portal</a> to view your prescription schedule and follow-up steps.</p>
-            </div>`,
-          });
-
-          await Appointment.findByIdAndUpdate(appointmentId, {
-            'postVisitSummary.patientSummaryEmailSentAt': new Date(),
-          });
+        if (apt) {
+          approvedSummary = apt.postVisitSummary?.patientSummary?.approvedText || apt.postVisitSummary?.clinicalNotes;
+          patientName = apt.patientId?.name;
+          doctorName = apt.doctorId?.name;
         }
-      } else if (type === 'booking_confirmation') {
-        await EmailService.sendBookingConfirmation(payload);
-      } else if (type === 'doctor_credentials') {
-        await EmailService.sendDoctorCredentials(payload);
-      } else if (type === 'booking_cancellation') {
-        await EmailService.sendBookingCancellation(payload);
-      } else {
-        await EmailService.sendEmail(payload);
       }
-    },
-    { connection, concurrency: 10 }
-  );
+
+      emailResult = await EmailService.sendPostVisitSummary({
+        to: targetEmail,
+        patientName: patientName || 'Patient',
+        doctorName: doctorName || 'Physician',
+        approvedSummary: approvedSummary || 'Visit summary completed.',
+      });
+    } else if (effectiveType === 'doctor_credentials') {
+      emailResult = await EmailService.sendDoctorCredentials(payload);
+    } else if (effectiveType === 'medication_reminder') {
+      emailResult = await EmailService.sendMedicationReminder({
+        to: targetEmail,
+        patientName: payload.patientName,
+        medicationName: payload.medicationName,
+        dosage: payload.dosage,
+        schedule: payload.schedule,
+      });
+    } else {
+      emailResult = await EmailService.sendEmail({
+        to: targetEmail,
+        subject: title || payload.subject || 'VibeHealth Notification',
+        text: message || payload.text || '',
+        html: payload.html || undefined,
+      });
+    }
+
+    if (emailResult.success) {
+      if (notification) {
+        notification.deliveryStatus = 'sent';
+        notification.sentAt = new Date();
+        notification.lastError = null;
+        await notification.save();
+      }
+      logger.info(`✅ Email notification job #${job.id} delivered to ${targetEmail}`);
+      return emailResult;
+    } else {
+      if (notification) {
+        notification.lastError = emailResult.error;
+        await notification.save();
+      }
+      logger.warn(`❌ Email notification job #${job.id} failed (attempt ${job.attemptsMade}): ${emailResult.error}`);
+      throw new Error(emailResult.error || 'Email dispatch failed');
+    }
+  };
+
+  const emailWorker = new Worker('email-queue', processNotificationJob, { connection, concurrency: 10 });
+  const reminderWorker = new Worker('reminder-queue', processNotificationJob, { connection, concurrency: 10 });
 
   // 3. Google Calendar Sync Worker
   const calendarWorker = new Worker(
@@ -261,22 +342,48 @@ export const startWorkers = () => {
     { connection, concurrency: 5 }
   );
 
-  const workers = [llmWorker, emailWorker, calendarWorker, slotHoldWorker];
+  // Register final-attempt failure listener for email & reminder workers
+  [emailWorker, reminderWorker].forEach((worker) => {
+    worker.on('failed', async (job, err) => {
+      if (!job) return;
+      const { notificationId } = job.data ?? {};
+      const maxAttempts = job.opts?.attempts ?? 3;
 
-  // llmWorker already has a dedicated 'failed' listener registered above.
-  // Register generic error/failed logging for the remaining workers.
-  const nonLLMWorkers = [emailWorker, calendarWorker, slotHoldWorker];
-  nonLLMWorkers.forEach((worker) => {
-    worker.on('failed', (job, err) => {
-      logger.error(`Worker [${worker.name}] job failed (ID: ${job?.id}):`, { error: err.message });
+      if (job.attemptsMade >= maxAttempts) {
+        logger.error(`Worker [${worker.name}] all ${maxAttempts} retries exhausted for job #${job.id}. Ensuring status=failed.`, {
+          error: err.message,
+        });
+
+        try {
+          if (notificationId) {
+            await Notification.findByIdAndUpdate(notificationId, {
+              deliveryStatus: 'failed',
+              lastError: err.message,
+            });
+          } else if (job.id) {
+            await Notification.findOneAndUpdate(
+              { jobId: job.id.toString() },
+              { deliveryStatus: 'failed', lastError: err.message }
+            );
+          }
+        } catch (dbErr) {
+          logger.error(`Failed to mark Notification status=failed: ${dbErr.message}`);
+        }
+      }
     });
+  });
 
+  const workers = [llmWorker, emailWorker, reminderWorker, calendarWorker, slotHoldWorker];
+
+  // Register generic error logging for workers
+  const nonLLMWorkers = [emailWorker, reminderWorker, calendarWorker, slotHoldWorker];
+  nonLLMWorkers.forEach((worker) => {
     worker.on('error', (err) => {
       logger.error(`Worker [${worker.name}] internal error:`, { error: err.message });
     });
   });
 
-  // Register generic error listener on llmWorker (failed is already handled above)
+  // Register generic error listener on llmWorker
   llmWorker.on('error', (err) => {
     logger.error(`Worker [${llmWorker.name}] internal error:`, { error: err.message });
   });

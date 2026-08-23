@@ -4,6 +4,7 @@ import { DoctorProfile } from '../models/DoctorProfile.js';
 import { User } from '../models/User.js';
 import { Leave } from '../models/Leave.js';
 import { SlotHoldService } from '../services/slotHoldService.js';
+import { NotificationService } from '../services/notificationService.js';
 import {
   dispatchEmailJob,
   dispatchLLMSummaryJob,
@@ -288,17 +289,54 @@ export const confirmAppointment = async (req, res, next) => {
       },
     });
 
-    // 3. Confirmation Email Stub
-    dispatchEmailJob('send-booking-confirmation', {
-      type: 'booking_confirmation',
+    // 3. Confirmation Email & 24h Delayed Reminder via NotificationService (Document-First & Reliable)
+    NotificationService.createAndDispatchNotification({
+      userId: req.user._id,
+      recipientEmail: req.user.email,
+      type: 'appointment_confirmed',
+      emailType: 'booking_confirmation',
+      title: `Appointment Confirmed with Dr. ${doctorUser?.name || 'Doctor'}`,
+      message: `Your appointment on ${new Date(appointment.startTime).toLocaleString()} is confirmed. Ref: #${appointment._id}`,
+      metadata: { appointmentId: appointment._id, doctorId: appointment.doctorId },
       payload: {
         to: req.user.email,
         patientName: req.user.name,
         doctorName: doctorUser?.name || 'Doctor',
         startTime: appointment.startTime,
         appointmentId: appointment._id,
+        isDoctorCopy: false,
       },
-    });
+    }).catch((err) => logger.error(`Failed to queue patient confirmation email: ${err.message}`));
+
+    if (doctorUser?.email) {
+      NotificationService.createAndDispatchNotification({
+        userId: doctorUser._id,
+        recipientEmail: doctorUser.email,
+        type: 'appointment_confirmed',
+        emailType: 'booking_confirmation',
+        title: `New Consultation Booked: ${req.user.name}`,
+        message: `New consultation booked by ${req.user.name} for ${new Date(appointment.startTime).toLocaleString()}.`,
+        metadata: { appointmentId: appointment._id, doctorId: appointment.doctorId },
+        payload: {
+          to: doctorUser.email,
+          patientName: req.user.name,
+          doctorName: doctorUser.name,
+          startTime: appointment.startTime,
+          appointmentId: appointment._id,
+          isDoctorCopy: true,
+        },
+      }).catch((err) => logger.error(`Failed to queue doctor confirmation email: ${err.message}`));
+    }
+
+    // 4. Schedule 24h Delayed Reminder (Cancelled deterministically if appointment is cancelled)
+    NotificationService.schedule24hReminder({
+      appointmentId: appointment._id.toString(),
+      userId: req.user._id,
+      recipientEmail: req.user.email,
+      patientName: req.user.name,
+      doctorName: doctorUser?.name || 'Doctor',
+      startTime: appointment.startTime,
+    }).catch((err) => logger.error(`Failed to schedule 24h reminder: ${err.message}`));
 
     return ApiResponse.success(
       res,
@@ -381,6 +419,55 @@ export const cancelAppointment = async (req, res, next) => {
         doctorId: appointment.doctorId,
         eventDetails: { eventId: appointment.calendarEventId },
       });
+    }
+
+    // Deterministically cancel any scheduled 24h reminder job in BullMQ
+    await NotificationService.cancel24hReminder(appointment._id);
+
+    // Send cancellation notifications to patient & doctor
+    const [patientUser, doctorUser] = await Promise.all([
+      User.findById(appointment.patientId),
+      User.findById(appointment.doctorId),
+    ]);
+
+    const cancelledBy = req.user._id.toString() === appointment.patientId.toString() ? 'Patient' : 'Doctor';
+
+    if (patientUser?.email) {
+      NotificationService.createAndDispatchNotification({
+        userId: patientUser._id,
+        recipientEmail: patientUser.email,
+        type: 'appointment_cancelled',
+        emailType: 'cancellation',
+        title: 'Appointment Cancelled',
+        message: `Your consultation on ${new Date(appointment.startTime).toLocaleString()} was cancelled by ${cancelledBy}.`,
+        metadata: { appointmentId: appointment._id, doctorId: appointment.doctorId },
+        payload: {
+          to: patientUser.email,
+          recipientName: patientUser.name,
+          otherPartyName: doctorUser?.name ? `Dr. ${doctorUser.name}` : 'your physician',
+          startTime: appointment.startTime,
+          cancelledBy,
+        },
+      }).catch((err) => logger.error(`Failed to dispatch patient cancellation email: ${err.message}`));
+    }
+
+    if (doctorUser?.email) {
+      NotificationService.createAndDispatchNotification({
+        userId: doctorUser._id,
+        recipientEmail: doctorUser.email,
+        type: 'appointment_cancelled',
+        emailType: 'cancellation',
+        title: 'Consultation Cancelled',
+        message: `Consultation with ${patientUser?.name || 'patient'} on ${new Date(appointment.startTime).toLocaleString()} was cancelled by ${cancelledBy}.`,
+        metadata: { appointmentId: appointment._id, doctorId: appointment.doctorId },
+        payload: {
+          to: doctorUser.email,
+          recipientName: `Dr. ${doctorUser.name}`,
+          otherPartyName: patientUser?.name || 'Patient',
+          startTime: appointment.startTime,
+          cancelledBy,
+        },
+      }).catch((err) => logger.error(`Failed to dispatch doctor cancellation email: ${err.message}`));
     }
 
     return ApiResponse.success(res, { appointment }, 'Appointment cancelled successfully');

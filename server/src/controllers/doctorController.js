@@ -5,6 +5,7 @@ import { Leave } from '../models/Leave.js';
 import { Appointment } from '../models/Appointment.js';
 import { Notification } from '../models/Notification.js';
 import { SlotHoldService } from '../services/slotHoldService.js';
+import { NotificationService } from '../services/notificationService.js';
 import { dispatchEmailJob, dispatchCalendarSyncJob } from '../jobs/queue.js';
 import { config } from '../config/env.js';
 import { ApiResponse } from '../utils/apiResponse.js';
@@ -413,27 +414,25 @@ export const requestLeave = async (req, res, next) => {
       // Release any Redis slot lock
       await SlotHoldService.releaseHold(targetDoctorId, apt.startTime);
 
-      // 1. Create in-app Notification for patient
-      if (apt.patientId?._id) {
+      // Deterministically cancel any 24h reminder scheduled for this appointment
+      await NotificationService.cancel24hReminder(apt._id);
+
+      // Create document-first Notification and dispatch cancellation email via BullMQ
+      if (apt.patientId?.email) {
         const aptDateStr = new Date(apt.startTime).toLocaleDateString('en-US', {
           month: 'short',
           day: 'numeric',
           year: 'numeric',
         });
 
-        await Notification.create({
+        await NotificationService.createAndDispatchNotification({
           userId: apt.patientId._id,
+          recipientEmail: apt.patientId.email,
           type: 'appointment_cancelled',
+          emailType: 'doctor_leave_cancellation',
           title: 'Appointment Cancelled - Doctor Unavailable',
           message: `Your appointment on ${aptDateStr} with Dr. ${doctorUser?.name || 'Doctor'} was cancelled because the physician is unavailable. Click to rebook.`,
           metadata: { appointmentId: apt._id, doctorId: targetDoctorId },
-        });
-      }
-
-      // 2. Dispatch cancellation email via BullMQ
-      if (apt.patientId?.email) {
-        dispatchEmailJob('send-booking-cancellation', {
-          type: 'booking_cancellation',
           payload: {
             to: apt.patientId.email,
             patientName: apt.patientId.name,
