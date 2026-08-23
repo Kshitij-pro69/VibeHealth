@@ -24,6 +24,7 @@ export const loginSchema = z.object({
 const generateToken = (user) => {
   return jwt.sign(
     {
+      userId: user._id,
       id: user._id,
       email: user.email,
       role: user.role,

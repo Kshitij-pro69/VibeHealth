@@ -1,11 +1,17 @@
+import mongoose from 'mongoose';
 import { ApiResponse } from '../utils/apiResponse.js';
 import { Appointment } from '../models/Appointment.js';
+import { DoctorProfile } from '../models/DoctorProfile.js';
 
 export const requireAppointmentOwnership = async (req, res, next) => {
   try {
     const { id } = req.params;
     if (!id) {
       return ApiResponse.error(res, 'Appointment ID parameter is required.', 400);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return ApiResponse.error(res, 'Appointment not found.', 404);
     }
 
     const appointment = await Appointment.findById(id);
@@ -36,6 +42,28 @@ export const requireAppointmentOwnership = async (req, res, next) => {
   }
 };
 
+export const requireDoctorProfileOwnership = async (req, res, next) => {
+  try {
+    const targetDoctorId = req.params.id || req.params.doctorId || req.body.doctorId;
+
+    if (req.user.role === 'admin') {
+      return next();
+    }
+
+    if (req.user.role !== 'doctor') {
+      return ApiResponse.error(res, 'Forbidden: Only doctors can modify doctor profiles.', 403);
+    }
+
+    if (targetDoctorId && targetDoctorId.toString() !== req.user._id.toString()) {
+      return ApiResponse.error(res, 'Forbidden: You can only modify your own doctor profile.', 403);
+    }
+
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const requireUserOwnership = (paramKey = 'userId') => {
   return (req, res, next) => {
     const targetUserId = req.params[paramKey] || req.body[paramKey];
@@ -51,3 +79,4 @@ export const requireUserOwnership = (paramKey = 'userId') => {
     next();
   };
 };
+

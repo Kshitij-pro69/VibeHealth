@@ -28,8 +28,9 @@ if (config.env === 'development') {
   });
 }
 
-// Mount API v1 Routes
+// Mount API Routes
 app.use('/api/v1', apiRouter);
+app.use('/api', apiRouter);
 
 // Root Welcome / Health Endpoint
 app.get('/', (req, res) => {

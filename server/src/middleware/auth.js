@@ -3,7 +3,7 @@ import { config } from '../config/env.js';
 import { User } from '../models/User.js';
 import { ApiResponse } from '../utils/apiResponse.js';
 
-export const authenticate = async (req, res, next) => {
+export const requireAuth = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -16,7 +16,13 @@ export const authenticate = async (req, res, next) => {
     }
 
     const decoded = jwt.verify(token, config.jwt.secret);
-    const user = await User.findById(decoded.id).select('+password');
+    const userId = decoded.userId || decoded.id;
+
+    if (!userId) {
+      return ApiResponse.error(res, 'Invalid token payload.', 401);
+    }
+
+    const user = await User.findById(userId);
 
     if (!user || !user.isActive) {
       return ApiResponse.error(res, 'User account not found or inactive.', 401);
@@ -36,3 +42,7 @@ export const authenticate = async (req, res, next) => {
     return next(error);
   }
 };
+
+// Backwards compatibility alias
+export const authenticate = requireAuth;
+
